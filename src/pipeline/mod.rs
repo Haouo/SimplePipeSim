@@ -3,4 +3,5 @@ pub mod bus;
 pub mod dcache;
 pub mod icache;
 pub mod pipe;
-pub mod simple_mem;
+pub mod l2cache;
+pub mod dram;
