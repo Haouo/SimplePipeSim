@@ -1,5 +1,6 @@
+pub mod abstract_device;
+pub mod bus;
 pub mod dcache;
-pub mod dram;
 pub mod icache;
-pub mod l2cache;
 pub mod pipe;
+pub mod simple_mem;
