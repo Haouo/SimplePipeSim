@@ -1,7 +1,7 @@
 use crate::pipeline::abstract_mem::AbstraceMemInterface;
 use crate::pipeline::main_mem::SimpleMem;
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 struct L1CacheTagUnit {
     tag: u32,
@@ -15,18 +15,23 @@ struct L1CacheBlock {
     tag: Box<[L1CacheTagUnit]>,
 }
 
-pub struct L1Cache{
+pub struct L1Cache {
     /// The main data struct to cache data.
     data: Box<[L1CacheBlock]>,
     /// The `Rc<_>` wrapping is for shared ownership
     /// because SimpleMem might be shared simultaneously by I$ and D$.
     /// The `RefCell<_>` wrapping is for mutability because cache might perform write-back
     mem_backdoor: Rc<RefCell<SimpleMem>>,
-    busy: bool,
-};
+    is_busy: bool,
+}
 
 impl L1Cache {
-    pub fn new(total_size: usize, block_size: usize, way_per_set: usize, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
+    pub fn new(
+        total_size: usize,
+        block_size: usize,
+        way_per_set: usize,
+        mem_ref: Rc<RefCell<SimpleMem>>,
+    ) -> Self {
         let set_num = total_size / (block_size * way_per_set);
         let word_per_block = block_size / 32;
         // bottom-up construction
@@ -49,6 +54,7 @@ impl L1Cache {
         L1Cache {
             data: sets.into_boxed_slice(),
             mem_backdoor: mem_ref,
+            is_busy: false,
         }
     }
     fn insert(&self) {
@@ -58,7 +64,7 @@ impl L1Cache {
         todo!();
     }
     fn finish_callback(&mut self) {
-        self.busy = false;
+        self.is_busy = false;
         // TODO: call the upper-level master's callback function to send notification
     }
 }

@@ -10,7 +10,7 @@ const MAIN_MEM_LATENCY: usize = 50;
 pub struct MemRequest {
     addr: u32,
     len: u32,
-    access_type: AccessType,
+    is_store: bool,
     finish_callback: fn(),
     payload: Option<Vec<u8>>,
 }
@@ -56,8 +56,4 @@ impl SimpleMem {
     pub fn access_register(&mut self, mem_request: &mut MemRequest, finish_callback: fn()) {
         //
     }
-}
-
-impl AbstraceMemInterface for SimpleMem {
-    //
 }
