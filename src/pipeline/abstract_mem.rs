@@ -22,3 +22,5 @@ pub trait AbstraceMemInterface<T> {
         unimplemented!();
     }
 }
+
+pub type MemFinishCallback<T> = fn(data: Option<Vec<T>>, result: Result<() ,()>);

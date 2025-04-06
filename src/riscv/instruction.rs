@@ -1,9 +1,16 @@
 use crate::pipeline::uop::{IndexValuePair, UOp};
 use crate::riscv::types::*;
 
-use std::mem::transmute; // for type casting
+pub struct InstIdentifier {
+    pub name: &'static str,
+    pub mask: u32,
+    pub data: u32
+}
 
-#[repr(u32)]
+// @TODO: build a pre-defined inst. table for all implemented inst.
+// const ALL_INSTRUCTION_DEF: [InstIdentifier: 46] =
+
+// #[repr(u32)]
 pub enum Instruction {
     /// ### LUI
     Lui(UType),
@@ -65,10 +72,6 @@ pub enum Instruction {
     Fence(IType),
     Ecall(IType),
     Ebreak(IType), // EBREAK is used to support smeihosting
-}
-
-pub fn u32_to_instruction(raw_inst: &u32) -> Instruction {
-    todo!();
 }
 
 impl Instruction {
