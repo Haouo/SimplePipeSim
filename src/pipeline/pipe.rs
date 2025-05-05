@@ -1,33 +1,40 @@
+// from other local crates
 use crate::pipeline::clock::Clocked;
-use crate::pipeline::l1cache::L1Cache;
-use crate::pipeline::main_mem::SimpleMem;
+use crate::pipeline::mem::l1cache::L1Cache;
+use crate::pipeline::mem::replacement_policy as rp;
+use crate::pipeline::mem::main_mem::SimpleMem;
 use crate::pipeline::uop::UOp;
 
+// external dep.
 use std::cell::RefCell;
 use std::rc::Rc;
 
-struct PipeState {
-    /// IF-Stage Inst. Fetch PC
+/// # Public struct `PipeState`
+///
+/// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor
+pub struct PipeState {
+    // IF-Stage instruction fetch PC
     pc: u32,
-    /// register file (be accessed in ID and WB)
+    // register file (be accessed in ID and WB)
     regs: [u32; 32],
-    /// ### ID, EXE, MEM, WB micro-op
-    ///
-    /// If the micro-op is Option::None, it means that
-    /// the current pipeline stage must be stalled.
+    // ID, EXE, MEM, WB micro-op
+    // If the micro-op is Option::None, it means that
+    // the current pipeline stage must be stalled.
     id_op: Option<UOp>,
     exe_op: Option<UOp>,
     mem_op: Option<UOp>,
     wb_op: Option<UOp>,
-    /// information for branch misprediction
+    // whether the memory request is completed
+    mem_done: Option<bool>,
+    // information for branch misprediction
     branch_recovery: bool,
     branch_flushes: u8,
-    /// imitate stall for integer mul/div instructions
+    // imitate stall for integer mul/div instructions
     int_mul_div_stall: u8,
-    /// L1 Instruction Cache
-    icache: L1Cache,
-    /// l1 data cache
-    dcache: L1Cache,
+    // L1 Instruction Cache
+    icache: L1Cache<rp::random::RandomRP>,
+    // l1 data cache
+    dcache: L1Cache<rp::random::RandomRP>,
 }
 
 impl PipeState {
@@ -42,6 +49,7 @@ impl PipeState {
             exe_op: None,
             mem_op: None,
             wb_op: None,
+            mem_done: None,
             branch_recovery: false,
             branch_flushes: 0,
             int_mul_div_stall: 0,
@@ -52,27 +60,27 @@ impl PipeState {
     }
     /// ### Instruction Fetch Pipeline Stage Function
     fn pipe_stage_fetch(&mut self) {
-        //
+        todo!();
     }
     /// ### Instruction Decode Pipeline Stage Function
     fn pipe_stage_decode(&mut self) {
-        //
+        todo!();
     }
     /// ### Instruction Execute Pipeline Stage Function
     fn pipe_stage_exe(&mut self) {
-        //
+        todo!();
     }
     /// ### Memory Access Pipeline Stage Function
     fn pipe_stage_mem(&mut self) {
-        //
+        todo!();
     }
     /// ### Architectural Register File Write-back Pipeline Stage Function
     fn pipe_stage_wb(&mut self) {
-        //
+        todo!();
     }
     /// ### Branch Recovering Stage when meeting branch mis-prediction
     fn pipe_branch_recover(&mut self) {
-        //
+        todo!();
     }
 }
 

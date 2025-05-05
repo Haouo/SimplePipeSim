@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 object = "0.36.7" # for ELF format parsing
 clap = "4.5.35" # command line argument parser
+rand = "0.9.1" # random number genertion
