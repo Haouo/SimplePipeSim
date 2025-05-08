@@ -1,7 +1,7 @@
 // from other local crates
 use crate::pipeline::clock::Clocked;
-use crate::pipeline::mem::l1cache::L1Cache;
-use crate::pipeline::mem::replacement_policy as rp;
+use crate::pipeline::mem::general_cache::GeneralCache;
+use crate::pipeline::mem::general_cache::replacement_policy as rp;
 use crate::pipeline::mem::main_mem::SimpleMem;
 use crate::pipeline::uop::UOp;
 
@@ -32,9 +32,9 @@ pub struct PipeState {
     // imitate stall for integer mul/div instructions
     int_mul_div_stall: u8,
     // L1 Instruction Cache
-    icache: L1Cache<rp::random::RandomRP>,
+    icache: GeneralCache<rp::random::RandomRP>,
     // l1 data cache
-    dcache: L1Cache<rp::random::RandomRP>,
+    dcache: GeneralCache<rp::random::RandomRP>,
 }
 
 impl PipeState {
@@ -54,8 +54,8 @@ impl PipeState {
             branch_flushes: 0,
             int_mul_div_stall: 0,
             // todo: modify the cache parameters
-            icache: L1Cache::new(0, 0, 0, Rc::clone(&mem_ref)),
-            dcache: L1Cache::new(0, 0, 0, Rc::clone(&mem_ref)),
+            icache: GeneralCache::new(0, 0, 0, Rc::clone(&mem_ref)),
+            dcache: GeneralCache::new(0, 0, 0, Rc::clone(&mem_ref)),
         }
     }
     /// ### Instruction Fetch Pipeline Stage Function

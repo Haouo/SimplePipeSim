@@ -1,29 +1,30 @@
 use std::cell::{Cell, RefCell};
-use std::rc::Weak;
+use std::rc::Rc;
 
 /// define the abstract type of MemRequest
 #[derive(Clone)]
-pub struct MemoryLoadReq<T> {
+pub struct MemoryLoadReq {
     pub addr: u32,
-    pub len: u32,
-    pub buffer: Weak<RefCell<Box<[T]>>>,
+    pub len: usize,
+    pub done: Rc<Cell<bool>>,
+    pub buffer: Rc<RefCell<Box<[u8]>>>,
 }
 
 #[derive(Clone)]
-pub struct MemoryStoreReq<T> {
+pub struct MemoryStoreReq {
     pub addr: u32,
-    pub len: u32,
-    pub store_data: Box<[T]>,
-    pub done: Weak<Cell<bool>>,
+    pub len: usize,
+    pub store_data: Box<[u8]>,
+    pub done: Rc<Cell<bool>>,
 }
 
 #[derive(Clone)]
-pub enum MemoryReqType<T> {
-    Load(MemoryLoadReq<T>),
-    Store(MemoryStoreReq<T>),
+pub enum MemoryReqType {
+    Load(MemoryLoadReq),
+    Store(MemoryStoreReq),
 }
 
-impl<T> MemoryReqType<T> {
+impl MemoryReqType {
     pub fn get_addr(&self) -> u32 {
         match self {
             MemoryReqType::Load(x) => x.addr,
@@ -31,12 +32,28 @@ impl<T> MemoryReqType<T> {
         }
     }
 
-    pub fn get_len(&self) -> u32 {
-            match self {
-                MemoryReqType::Load(x) => x.len,
-                MemoryReqType::Store(x) => x.len,
-            }
+    pub fn get_len(&self) -> usize {
+        match self {
+            MemoryReqType::Load(x) => x.len,
+            MemoryReqType::Store(x) => x.len,
         }
+    }
+
+    pub fn get_load_req(&self) -> MemoryLoadReq {
+        if let MemoryReqType::Load(load_req) = self {
+            load_req.clone()
+        } else {
+            panic!();
+        }
+    }
+
+    pub fn get_store_req(&self) -> MemoryStoreReq {
+        if let MemoryReqType::Store(store_req) = self {
+            store_req.clone()
+        } else {
+            panic!();
+        }
+    }
 }
 
 /// ### AbstractMemInterface
@@ -46,6 +63,5 @@ impl<T> MemoryReqType<T> {
 ///
 /// the generic parameter `T` represents the granularity for manipulation the memory device
 pub trait AbstraceMemInterface {
-    type Granularity;
-    fn try_register_req(&mut self, req: MemoryReqType<Self::Granularity>) -> Result<(), ()>;
+    fn try_register_req(&mut self, req: &MemoryReqType) -> Result<(), ()>;
 }

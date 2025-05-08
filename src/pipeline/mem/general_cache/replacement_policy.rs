@@ -88,10 +88,8 @@ pub mod fifo {
             self.queue.retain(|&x| x != index);
         }
 
-        fn promote(&mut self, index: usize) {
-            self.queue.retain(|&x| x != index);
-            self.queue.push_front(index);
-        }
+        #[allow(unused)]
+        fn promote(&mut self, index: usize) {}
 
         fn evict(&mut self) -> (bool, usize) {
             for i in 0..self.valid.len() {
@@ -99,11 +97,13 @@ pub mod fifo {
                     return (false, i);
                 }
             }
+            self.valid[self.queue.len() - 1] = false;
             (true, self.queue.pop_back().unwrap())
         }
     }
 }
 
+#[allow(unused)]
 pub mod pseudo_lru {
     use super::ReplacementPolicy;
 
