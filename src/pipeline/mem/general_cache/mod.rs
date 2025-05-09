@@ -5,7 +5,7 @@ pub mod replacement_policy;
 // internal dep.
 use crate::pipeline::clock::Clocked;
 use crate::pipeline::mem::abstract_mem::*;
-use crate::pipeline::mem::main_mem::SimpleMem;
+use crate::pipeline::mem::simple_mem::SimpleMem;
 use cache_set::GeneralCacheSetUnit;
 use replacement_policy::ReplacementPolicy;
 
@@ -72,16 +72,9 @@ impl<RP: ReplacementPolicy> GeneralCache<RP> {
         GeneralCache {
             offset_bit_width: bytes_per_block.ilog2() as usize,
             index_bit_width: num_set.ilog2() as usize,
-            set: {
-                let mut temp_cache_set: Vec<GeneralCacheSetUnit<RP>> = vec![];
-                for i in 0..num_set {
-                    temp_cache_set.push(GeneralCacheSetUnit::<RP>::new(
-                        num_associativity,
-                        bytes_per_block,
-                    ));
-                }
-                temp_cache_set.into_boxed_slice()
-            },
+            set: (0..num_set)
+                .map(|_| GeneralCacheSetUnit::<RP>::new(num_associativity, bytes_per_block))
+                .collect(),
             fsm: MainStates::Idle,
             mem_ref,
             pending_req: None,
@@ -128,7 +121,11 @@ impl<RP: ReplacementPolicy> AbstraceMemInterface for GeneralCache<RP> {
             // and self.pending_req is None
             MainStates::Idle if self.pending_req.is_none() => {
                 self.pending_req = Some(req.clone());
-                match self.pending_req.as_ref().unwrap() {
+                match self
+                    .pending_req
+                    .as_ref()
+                    .expect("The match guard ensuare that pending_req should not be Option::None")
+                {
                     MemoryReqType::Load(_) => {
                         self.load_count += 1;
                     }
@@ -138,10 +135,9 @@ impl<RP: ReplacementPolicy> AbstraceMemInterface for GeneralCache<RP> {
                 }
                 return Ok(());
             }
-            _ => {
-                return Err(());
-            }
+            _ => {}
         }
+        Err(())
     }
 }
 
@@ -163,6 +159,7 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
                 match tag_compare_result {
                     // match arm 1: cache hit
                     Ok(way_index) => {
+                        println! {"Hit Way Index: {}", way_index};
                         // read the whole data block at first
                         let mut read_block = self.set[index].read_block(way_index);
 
@@ -198,6 +195,9 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
                                 self.store_miss_count += 1;
                             }
                         }
+
+                        // store current req to self.backup_req
+                        self.backup_req = Some(req.clone());
 
                         // judge whether it needs to write-back
                         if need_write_back {
@@ -258,7 +258,7 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
                 match second_state {
                     // try to send write request to next-level memory until it is accepted
                     StatesForOutMemReq::SendReq(ref req) => {
-                        if let Ok(_) = self.mem_ref.borrow_mut().try_register_req(req) {
+                        if self.mem_ref.borrow_mut().try_register_req(req).is_ok() {
                             *second_state = StatesForOutMemReq::WaitForComplete(req.clone());
                         }
                     }
@@ -286,7 +286,6 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
                             );
                         }
                     }
-                    _ => {}
                 }
             }
 
@@ -295,7 +294,7 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
                 match second_state {
                     StatesForOutMemReq::SendReq(ref req) => {
                         // try to send read request to next-level memory
-                        if let Ok(_) = self.mem_ref.borrow_mut().try_register_req(req) {
+                        if self.mem_ref.borrow_mut().try_register_req(req).is_ok() {
                             *second_state = StatesForOutMemReq::WaitForComplete(req.clone());
                         }
                     }
@@ -312,9 +311,6 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
                             let (new_tag, index, _) =
                                 self.addr_transfer(self.backup_req.as_ref().unwrap().get_addr());
                             self.set[index].insert_block(*evict_way, new_tag, load_data.as_ref());
-
-                            // transfer to Lookup state
-                            self.fsm = MainStates::Lookup(self.backup_req.take().unwrap());
 
                             // transfer self.fsm to AdditionalMissPenalty state
                             self.fsm =
@@ -339,18 +335,162 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
 }
 
 #[cfg(test)]
-mod l1cache_unit_tests {
+mod unit_tests {
     use super::*;
     use crate::pipeline::clock::Clocked;
-    use crate::pipeline::mem::general_cache::replacement_policy::ReplacementPolicy;
-    use crate::pipeline::mem::main_mem::SimpleMem;
+    use crate::pipeline::mem::general_cache::replacement_policy::fifo::FifoRP;
+    use crate::pipeline::mem::simple_mem::SimpleMem;
 
-    // #[test]
+    use rand::Rng;
+
+    fn initialize_system() -> (GeneralCache<FifoRP>, Rc<RefCell<SimpleMem>>) {
+        let mut rng = rand::rng();
+        let mut random_init_data = vec![0u8; 0x10000];
+        for i in 0..0x10000 {
+            random_init_data[i] = rng.random_range(0..=255);
+        }
+
+        let mem = Rc::new(RefCell::new(SimpleMem::new(random_init_data)));
+        let cache = GeneralCache::<FifoRP>::new(4096, 4, 32, Rc::clone(&mem));
+        (cache, mem)
+    }
+
+    #[test]
+    fn allocate_without_write_back() {
+        let (mut cache, mem) = initialize_system();
+
+        let read_req_for_cache = MemoryReqType::Load(MemoryLoadReq {
+            addr: 100,
+            len: 4,
+            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+            done: Rc::new(Cell::new(false)),
+        });
+        let read_req_for_mem = MemoryReqType::Load(MemoryLoadReq {
+            addr: 100,
+            len: 4,
+            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+            done: Rc::new(Cell::new(false)),
+        });
+
+        if cache.try_register_req(&read_req_for_cache).is_err() {
+            panic!();
+        }
+        if mem
+            .borrow_mut()
+            .try_register_req(&read_req_for_mem)
+            .is_err()
+        {
+            panic!();
+        };
+
+        while !read_req_for_cache.get_load_req().done.get()
+            || !read_req_for_mem.get_load_req().done.get()
+        {
+            mem.borrow_mut().tick();
+            cache.tick();
+        }
+
+        for i in 0..4 {
+            assert_eq!(
+                read_req_for_cache.get_load_req().buffer.borrow()[i],
+                read_req_for_mem.get_load_req().buffer.borrow()[i]
+            );
+        }
+    }
+
+    #[test]
+    fn cause_write_back() {
+        let (mut cache, mem) = initialize_system();
+        let num_set = 32u32;
+        let block_size = 32u32;
+
+        // it needs at least 5 read access and 1 write access
+        // to the cache to cause a write-backe operation
+        // the cache has 32 sets, and each set has 4 ways
+
+        // 4 consecutive read accesses to the cache
+        for i in 0..4 {
+            let read_req = MemoryReqType::Load(MemoryLoadReq {
+                addr: 0 + block_size * num_set * i,
+                len: 4,
+                buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+                done: Rc::new(Cell::new(false)),
+            });
+            if cache.try_register_req(&read_req).is_err() {
+                panic!();
+            }
+            while !read_req.get_load_req().done.get() {
+                cache.tick();
+                mem.borrow_mut().tick();
+            }
+        }
+
+        // 1 write access to make a dirty block in the cache
+        let write_req = MemoryReqType::Store(MemoryStoreReq {
+            addr: 0,
+            len: 4,
+            store_data: vec![123u8; 4].into_boxed_slice(),
+            done: Rc::new(Cell::new(false)),
+        });
+        if cache.try_register_req(&write_req).is_err() {
+            panic!();
+        }
+        while !write_req.get_store_req().done.get() {
+            cache.tick();
+            mem.borrow_mut().tick();
+        }
+        std::mem::drop(write_req);
+
+        // 1 read access to the different memory location
+        // while the location is mapped to the same set in the cache
+        // This read access causes to the write-back operation
+        let read_req = MemoryReqType::Load(MemoryLoadReq {
+            addr: 0 + block_size * num_set * 4,
+            len: 4,
+            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+            done: Rc::new(Cell::new(false)),
+        });
+        let mut ever_been_write_back_state = false;
+        if cache.try_register_req(&read_req).is_err() {
+            panic!();
+        }
+        while !read_req.get_load_req().done.get() {
+            cache.tick();
+            mem.borrow_mut().tick();
+
+            if let MainStates::WriteBack(_, _) = cache.fsm {
+                ever_been_write_back_state = true;
+            }
+        }
+        assert!(
+            ever_been_write_back_state,
+            "The cache never reaches the write-back state"
+        );
+
+        // read the data has been written back to mem and check the values
+        let read_req = MemoryReqType::Load(MemoryLoadReq {
+            addr: 0,
+            len: 4,
+            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+            done: Rc::new(Cell::new(false)),
+        });
+        if mem.borrow_mut().try_register_req(&read_req).is_err() {
+            panic!();
+        }
+        while !read_req.get_load_req().done.get() {
+            mem.borrow_mut().tick();
+        }
+        for item in read_req.get_load_req().buffer.borrow().iter() {
+            assert_eq!(*item, 123);
+        }
+    }
+
+    #[test]
     fn sequential_read_write() {
         todo!();
     }
 
-    // #[test]
+    #[test]
     fn random_read_write() {
         todo!();
     }

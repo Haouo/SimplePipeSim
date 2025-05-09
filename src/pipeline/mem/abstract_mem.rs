@@ -39,19 +39,19 @@ impl MemoryReqType {
         }
     }
 
-    pub fn get_load_req(&self) -> MemoryLoadReq {
-        if let MemoryReqType::Load(load_req) = self {
-            load_req.clone()
+    pub fn get_load_req(&self) -> &MemoryLoadReq {
+        if let MemoryReqType::Load(ref load_req) = self {
+            load_req
         } else {
-            panic!();
+            panic!("Try to unwrap a MemoryStoreReq with get_load_req(), which makes no sense.");
         }
     }
 
-    pub fn get_store_req(&self) -> MemoryStoreReq {
-        if let MemoryReqType::Store(store_req) = self {
-            store_req.clone()
+    pub fn get_store_req(&self) -> &MemoryStoreReq {
+        if let MemoryReqType::Store(ref store_req) = self {
+            &store_req
         } else {
-            panic!();
+            panic!("Try to unwrap a MemoryLoadReq with get_store_req(), which makes no sense.");
         }
     }
 }

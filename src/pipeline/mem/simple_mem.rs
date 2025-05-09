@@ -25,18 +25,17 @@ impl SimpleMem {
     ///
     /// it will load the ELF firstly and
     /// initialize the SimpleMem.data with the ELF contents.
-    pub fn new(file: &String) -> Self {
-        let mut elf_content: [u64; MEM_SIZE] = [0; MEM_SIZE];
+    pub fn new(init_data: Vec<u8>) -> Self {
+        #[cfg(feature = "show_log")]
+        info!("Construct SimpleMem with init_data");
 
-        todo!(); // load elf contents
-
-        // SimpleMem {
-        //     data: elf_content,
-        //     pending_request: None,
-        //     stall_countdown: MAIN_MEM_LATENCY,
-        //     load_access_count: 0,
-        //     store_access_count: 0,
-        // }
+        SimpleMem {
+            data: init_data.into_boxed_slice(),
+            pending_req: None,
+            stall_countdown: MAIN_MEM_LATENCY,
+            load_access_count: 0,
+            store_access_count: 0,
+        }
     }
 }
 
@@ -101,7 +100,7 @@ impl Clocked for SimpleMem {
 }
 
 #[cfg(test)]
-mod simple_mem_unit_tests {
+mod unit_tests {
     use super::*;
 
     use rand::Rng;

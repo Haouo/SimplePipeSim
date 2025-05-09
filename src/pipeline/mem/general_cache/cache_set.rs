@@ -34,7 +34,7 @@ where
     }
 
     pub fn tag_compare(&mut self, tag: u32) -> Result<usize, (bool, usize)> {
-        for i in 0..self.valid_array.len() {
+        for i in 0..self.num_associativity {
             if self.valid_array[i] && self.tag_array[i] == tag {
                 return Ok(i); // return Ok(the number of the hit way)
             }
@@ -67,8 +67,8 @@ where
 
     pub fn write_block(&mut self, way_index: usize, write_data: &[u8]) {
         // modify data block
-        for i in 0..self.bytes_per_block {
-            self.data_array[(self.bytes_per_block * way_index) + i] = write_data[i];
+        for (i, item) in write_data.iter().enumerate() {
+            self.data_array[(self.bytes_per_block * way_index) + i] = *item;
         }
         // set dirty bit
         self.dirty_array[way_index] = true;
@@ -80,8 +80,8 @@ where
 
     pub fn insert_block(&mut self, way_index: usize, new_tag: u32, new_data: &[u8]) {
         // modify data block
-        for i in 0..self.bytes_per_block {
-            self.data_array[(self.bytes_per_block * way_index) + i] = new_data[i];
+        for (i, item) in new_data.iter().enumerate() {
+            self.data_array[(self.bytes_per_block * way_index) + i] = *item;
         }
         // set valid bit
         self.valid_array[way_index] = true;

@@ -1,8 +1,8 @@
 // from other local crates
 use crate::pipeline::clock::Clocked;
-use crate::pipeline::mem::general_cache::GeneralCache;
 use crate::pipeline::mem::general_cache::replacement_policy as rp;
-use crate::pipeline::mem::main_mem::SimpleMem;
+use crate::pipeline::mem::general_cache::GeneralCache;
+use crate::pipeline::mem::simple_mem::SimpleMem;
 use crate::pipeline::uop::UOp;
 
 // external dep.

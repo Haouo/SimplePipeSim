@@ -54,7 +54,7 @@ pub mod random {
                 }
             }
             // generate a ranged usize random number
-            let evict_way = self.rng.random_range(0..self.valid.len()) as usize;
+            let evict_way = self.rng.random_range(0..self.valid.len());
             self.valid[evict_way] = false;
             (true, evict_way)
         }
