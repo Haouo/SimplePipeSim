@@ -1,5 +1,5 @@
+pub mod bus;
 pub mod clock;
+pub mod mem;
 pub mod pipe;
 pub mod uop;
-pub mod mem;
-pub mod bus;

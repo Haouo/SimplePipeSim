@@ -1,2 +1,2 @@
+pub mod format_types;
 pub mod instruction;
-pub mod types;

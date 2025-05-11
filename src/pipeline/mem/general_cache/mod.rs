@@ -1,15 +1,12 @@
-// declare sub-modules
 pub mod cache_set;
 pub mod replacement_policy;
 
-// internal dep.
 use crate::pipeline::clock::Clocked;
 use crate::pipeline::mem::abstract_mem::*;
 use crate::pipeline::mem::simple_mem::SimpleMem;
 use cache_set::GeneralCacheSetUnit;
 use replacement_policy::ReplacementPolicy;
 
-// external dep.
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 

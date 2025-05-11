@@ -1,22 +1,22 @@
-// from other local crates
 use crate::pipeline::clock::Clocked;
 use crate::pipeline::mem::general_cache::replacement_policy as rp;
 use crate::pipeline::mem::general_cache::GeneralCache;
 use crate::pipeline::mem::simple_mem::SimpleMem;
 use crate::pipeline::uop::UOp;
 
-// external dep.
 use std::cell::RefCell;
 use std::rc::Rc;
 
 /// # Public struct `PipeState`
 ///
 /// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor
-pub struct PipeState {
+pub struct FiveStagePipeStage {
     // IF-Stage instruction fetch PC
-    pc: u32,
+    if_pc: u32,
+
     // register file (be accessed in ID and WB)
-    regs: [u32; 32],
+    id_regs: [u32; 32],
+
     // ID, EXE, MEM, WB micro-op
     // If the micro-op is Option::None, it means that
     // the current pipeline stage must be stalled.
@@ -24,27 +24,31 @@ pub struct PipeState {
     exe_op: Option<UOp>,
     mem_op: Option<UOp>,
     wb_op: Option<UOp>,
+
     // whether the memory request is completed
     mem_done: Option<bool>,
+
     // information for branch misprediction
     branch_recovery: bool,
     branch_flushes: u8,
+
     // imitate stall for integer mul/div instructions
     int_mul_div_stall: u8,
+
     // L1 Instruction Cache
     icache: GeneralCache<rp::random::RandomRP>,
     // l1 data cache
     dcache: GeneralCache<rp::random::RandomRP>,
 }
 
-impl PipeState {
+impl FiveStagePipeStage {
     /// The constructor of PipeState struct.
     ///
     /// This function also have the responsibility for initialization the object.
     pub fn new(init_pc: u32, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
-        PipeState {
-            pc: init_pc,
-            regs: [0; 32],
+        FiveStagePipeStage {
+            if_pc: init_pc,
+            id_regs: [0; 32],
             id_op: None,
             exe_op: None,
             mem_op: None,
@@ -84,7 +88,7 @@ impl PipeState {
     }
 }
 
-impl Clocked for PipeState {
+impl Clocked for FiveStagePipeStage {
     /// ### tick() function to simulate clock-edge trigger
     ///
     /// We should consider the simulation order of pipeline stage carefully.

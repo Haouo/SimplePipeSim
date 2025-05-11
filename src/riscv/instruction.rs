@@ -1,43 +1,39 @@
-use crate::pipeline::uop::{IndexValuePair, UOp};
-use crate::riscv::types::*;
+use object::elf::PF_ARM_ABS;
 
-pub struct InstIdentifier {
-    pub name: &'static str,
-    pub mask: u32,
-    pub data: u32
-}
+use crate::riscv::format_types::*;
 
-// @TODO: build a pre-defined inst. table for all implemented inst.
-// const ALL_INSTRUCTION_DEF: [InstIdentifier: 46] =
-
-// #[repr(u32)]
+/// Enumeration of all supported instructions (RV32IM without Privileged Arch.)
 pub enum Instruction {
-    /// ### LUI
+    //LUI
     Lui(UType),
-    /// ### AUIPC
+    // AUIPC
     Auipc(UType),
-    /// ### JAL
+    // JAL
     Jal(JType),
-    /// ### JALR
+    // JALR
     Jalr(IType),
-    /// ### BRANCH
+
+    // BRANCH
     Beq(BType),
     Bne(BType),
     Blt(BType),
     Bge(BType),
     Bltu(BType),
     Bgeu(BType),
-    /// ### LOAD
+
+    // LOAD
     Lb(IType),
     Lh(IType),
     Lw(IType),
     Lbu(IType),
     Lhu(IType),
-    /// ### STORE
+
+    // STORE
     Sb(SType),
     Sh(SType),
     Sw(SType),
-    /// ### OP-IMM
+
+    // OP-IMM
     Addi(IType),
     Slti(IType),
     Sltiu(IType),
@@ -47,9 +43,9 @@ pub enum Instruction {
     Slli(IType),
     Srli(IType),
     Srai(IType),
-    /// ### OP
-    ///
-    /// It includes both base integer instructions and M-extension instructions
+
+    // OP
+    // It includes both base integer instructions and M-extension instructions
     Add(RType),
     Sub(RType),
     Sll(RType),
@@ -68,78 +64,162 @@ pub enum Instruction {
     Divu(RType),
     Rem(RType),
     Remu(RType),
-    /// SYSTEM
+
+    // SYSTEM
     Fence(IType),
     Ecall(IType),
-    Ebreak(IType), // EBREAK is used to support smeihosting
+
+    // illega instruction identifier type
+    Illegal(u32),
 }
 
 impl Instruction {
-    pub fn gen_uop(&self) -> UOp {
-        let mut uop = UOp::default();
-        match self {
-            // LUI
-            Self::Lui(utype) => {
-                // TODO
-            }
-            // AUIPC
-            Self::Auipc(u_type) => {}
-            // JAL
-            Self::Jal(j_type) => {}
-            // JALR
-            Self::Jalr(i_type) => {}
-            // BRANCH
-            Self::Beq(b_type) => {}
-            Self::Bne(b_type) => {}
-            Self::Blt(b_type) => {}
-            Self::Bge(b_type) => {}
-            Self::Bltu(b_type) => {}
-            Self::Bgeu(b_type) => {}
-            // LOAD
-            Self::Lb(i_type) => {}
-            Self::Lh(i_type) => {}
-            Self::Lw(i_type) => {}
-            Self::Lbu(i_type) => {}
-            Self::Lhu(i_type) => {}
-            // STORE
-            Self::Sb(s_type) => {}
-            Self::Sh(s_type) => {}
-            Self::Sw(s_type) => {}
-            // OP-IMM
-            Self::Addi(rtype) => {}
-            Self::Slti(rtype) => {}
-            Self::Sltiu(rtype) => {}
-            Self::Xori(rtype) => {}
-            Self::Ori(rtype) => {}
-            Self::Andi(rtype) => {}
-            Self::Slli(rtype) => {}
-            Self::Srli(rtype) => {}
-            Self::Srai(rtype) => {}
+    pub fn decode(raw_inst: u32) -> Self {
+        let opcode = raw_inst & 0x7f;
+        assert!(
+            (opcode & 0b11) == 0b11,
+            "The last two bits of instruction's OPCODE must be all ones."
+        );
+
+        match opcode {
             // OP
-            // It includes both base integer instructions and M-extension instructions
-            Self::Add(r_type) => {}
-            Self::Sub(r_type) => {}
-            Self::Sll(r_type) => {}
-            Self::Slt(r_type) => {}
-            Self::Sltu(r_type) => {}
-            Self::Xor(r_type) => {}
-            Self::Srl(r_type) => {}
-            Self::Sra(r_type) => {}
-            Self::Or(r_type) => {}
-            Self::And(r_type) => {}
-            Self::Mul(r_type) => {}
-            Self::Mulh(r_type) => {}
-            Self::Mulhsu(r_type) => {}
-            Self::Mulhu(r_type) => {}
-            Self::Div(r_type) => {}
-            Self::Divu(r_type) => {}
-            Self::Rem(r_type) => {}
-            Self::Remu(r_type) => {}
+            0b0110011 => {
+                let inst = RType(raw_inst);
+                match inst.func3() {
+                    0b000 => match inst.func7() {
+                        0b0100000 => Self::Sub(inst),
+                        0b0000000 => Self::Add(inst),
+                        0b0000001 => Self::Mul(inst),
+                        _ => Self::Illegal(raw_inst),
+                    },
+                    0b001 => match inst.func7() {
+                        0 => Self::Sll(inst),
+                        1 => Self::Mulh(inst),
+                        _ => Self::Illegal(raw_inst),
+                    },
+                    0b010 => match inst.func7() {
+                        0 => Self::Slt(inst),
+                        1 => Self::Mulhsu(inst),
+                        _ => Self::Illegal(raw_inst),
+                    },
+                    0b011 => match inst.func7() {
+                        0 => Self::Sltu(inst),
+                        1 => Self::Mulhu(inst),
+                        _ => Self::Illegal(raw_inst),
+                    },
+                    0b100 => match inst.func7() {
+                        0 => Self::Xor(inst),
+                        1 => Self::Div(inst),
+                        _ => Self::Illegal(raw_inst),
+                    },
+                    0b101 => match inst.func7() {
+                        0 => Self::Srl(inst),
+                        0b0100000 => Self::Sra(inst),
+                        1 => Self::Divu(inst),
+                        _ => Self::Illegal(raw_inst),
+                    },
+                    0b110 => match inst.func7() {
+                        0 => Self::Or(inst),
+                        1 => Self::Rem(inst),
+                        _ => Self::Illegal(raw_inst),
+                    },
+                    0b111 => match inst.func7() {
+                        0 => Self::And(inst),
+                        1 => Self::Remu(inst),
+                        _ => Self::Illegal(raw_inst),
+                    },
+                    _ => unreachable!(),
+                }
+            }
+
+            // OP-IMM
+            0b0010011 => {
+                let inst = IType(raw_inst);
+                match inst.func3() {
+                    0b000 => Self::Addi(inst),
+                    0b010 => Self::Slti(inst),
+                    0b011 => Self::Sltiu(inst),
+                    0b100 => Self::Xori(inst),
+                    0b110 => Self::Ori(inst),
+                    0b111 => Self::Andi(inst),
+                    0b001 => Self::Slli(inst),
+                    0b101 => match inst.imm11_0() >> 5 {
+                        0 => Self::Srli(inst),
+                        0b0100000 => Self::Srai(inst),
+                        _ => Self::Illegal(raw_inst),
+                    },
+                    _ => unreachable!(),
+                }
+            }
+
+            // LOAD
+            0b0000011 => {
+                let inst = IType(raw_inst);
+                match inst.func3() {
+                    0b000 => Self::Lb(inst),
+                    0b001 => Self::Lh(inst),
+                    0b010 => Self::Lw(inst),
+                    0b100 => Self::Lbu(inst),
+                    0b101 => Self::Lhu(inst),
+                    _ => Self::Illegal(raw_inst),
+                }
+            }
+
+            // STORE
+            0b0100011 => {
+                let inst = SType(raw_inst);
+                match inst.func3() {
+                    0b000 => Self::Sb(inst),
+                    0b001 => Self::Sh(inst),
+                    0b010 => Self::Sw(inst),
+                    _ => Self::Illegal(raw_inst),
+                }
+            }
+
+            // BRANCH
+            0b1100011 => {
+                let inst = BType(raw_inst);
+                match inst.func3() {
+                    0b000 => Self::Beq(inst),
+                    0b001 => Self::Bne(inst),
+                    0b100 => Self::Blt(inst),
+                    0b101 => Self::Bge(inst),
+                    0b110 => Self::Bltu(inst),
+                    0b111 => Self::Bgeu(inst),
+                    _ => Self::Illegal(raw_inst),
+                }
+            }
+
+            // JAL
+            0b1101111 => Self::Jal(JType(raw_inst)),
+
+            // JALR
+            0b1100111 => Self::Jalr(IType(raw_inst)),
+
+            // LUI
+            0b0110111 => Self::Lui(UType(raw_inst)),
+
+            // AUIPC
+            0b0010111 => Self::Auipc(UType(raw_inst)),
+
+            // FENCE
+            0b0001111 => {
+                let inst = IType(raw_inst);
+                todo!();
+            }
+
             // SYSTEM
-            Self::Fence(i_type) => {}
-            Self::Ecall(i_type) => {}
-            Self::Ebreak(i_type) => {}
+            0b1110011 => {
+                let inst = IType(raw_inst);
+                if let 0 = inst.imm11_0() {
+                    Self::Ecall(inst)
+                } else {
+                    Self::Illegal(raw_inst)
+                }
+            }
+
+            // illegal instructions
+            _ => Self::Illegal(raw_inst),
         }
-        uop
     }
 }
