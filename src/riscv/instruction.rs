@@ -73,6 +73,12 @@ pub enum Instruction {
     Illegal(u32),
 }
 
+impl Default for Instruction {
+    fn default() -> Self {
+        Self::Illegal(0u32)
+    }
+}
+
 impl Instruction {
     pub fn decode(raw_inst: u32) -> Self {
         let opcode = raw_inst & 0x7f;
@@ -221,5 +227,14 @@ impl Instruction {
             // illegal instructions
             _ => Self::Illegal(raw_inst),
         }
+    }
+}
+
+#[cfg(test)]
+mod unit_test {
+    #[test]
+
+    fn decode_each_types() {
+        todo!();
     }
 }

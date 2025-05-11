@@ -262,7 +262,7 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
 
                     // wait for the write request to next-level memory to be completed
                     StatesForOutMemReq::WaitForComplete(ref req) => {
-                        let store_req = req.get_store_req();
+                        let store_req = req.get_store_req_ref();
                         if store_req.done.get() {
                             // prepare for allocate
                             let allocate_addr = self.backup_req.as_ref().unwrap().get_addr()
@@ -296,7 +296,7 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
                         }
                     }
                     StatesForOutMemReq::WaitForComplete(ref req) => {
-                        let load_req = req.get_load_req();
+                        let load_req = req.get_load_req_ref();
                         if load_req.done.get() {
                             // get load data
                             let mut load_data: Vec<u8> = Vec::new();
@@ -380,8 +380,8 @@ mod unit_tests {
             panic!();
         };
 
-        while !read_req_for_cache.get_load_req().done.get()
-            || !read_req_for_mem.get_load_req().done.get()
+        while !read_req_for_cache.get_load_req_ref().done.get()
+            || !read_req_for_mem.get_load_req_ref().done.get()
         {
             mem.borrow_mut().tick();
             cache.tick();
@@ -389,8 +389,8 @@ mod unit_tests {
 
         for i in 0..4 {
             assert_eq!(
-                read_req_for_cache.get_load_req().buffer.borrow()[i],
-                read_req_for_mem.get_load_req().buffer.borrow()[i]
+                read_req_for_cache.get_load_req_ref().buffer.borrow()[i],
+                read_req_for_mem.get_load_req_ref().buffer.borrow()[i]
             );
         }
     }
@@ -416,7 +416,7 @@ mod unit_tests {
             if cache.try_register_req(&read_req).is_err() {
                 panic!();
             }
-            while !read_req.get_load_req().done.get() {
+            while !read_req.get_load_req_ref().done.get() {
                 cache.tick();
                 mem.borrow_mut().tick();
             }
@@ -432,7 +432,7 @@ mod unit_tests {
         if cache.try_register_req(&write_req).is_err() {
             panic!();
         }
-        while !write_req.get_store_req().done.get() {
+        while !write_req.get_store_req_ref().done.get() {
             cache.tick();
             mem.borrow_mut().tick();
         }
@@ -451,7 +451,7 @@ mod unit_tests {
         if cache.try_register_req(&read_req).is_err() {
             panic!();
         }
-        while !read_req.get_load_req().done.get() {
+        while !read_req.get_load_req_ref().done.get() {
             cache.tick();
             mem.borrow_mut().tick();
 
@@ -474,10 +474,10 @@ mod unit_tests {
         if mem.borrow_mut().try_register_req(&read_req).is_err() {
             panic!();
         }
-        while !read_req.get_load_req().done.get() {
+        while !read_req.get_load_req_ref().done.get() {
             mem.borrow_mut().tick();
         }
-        for item in read_req.get_load_req().buffer.borrow().iter() {
+        for item in read_req.get_load_req_ref().buffer.borrow().iter() {
             assert_eq!(*item, 123);
         }
     }

@@ -26,9 +26,6 @@ impl SimpleMem {
     /// it will load the ELF firstly and
     /// initialize the SimpleMem.data with the ELF contents.
     pub fn new(init_data: Vec<u8>) -> Self {
-        #[cfg(feature = "show_log")]
-        info!("Construct SimpleMem with init_data");
-
         SimpleMem {
             data: init_data.into_boxed_slice(),
             pending_req: None,
@@ -153,7 +150,7 @@ mod unit_tests {
                     mem_golden[access_start_addr as usize + i] = random_store_data[i];
                 }
 
-                while !store_req.get_store_req().done.get() {
+                while !store_req.get_store_req_ref().done.get() {
                     mem_dut.tick();
                 }
 
@@ -167,12 +164,12 @@ mod unit_tests {
                 if let Err(()) = mem_dut.try_register_req(&load_req) {
                     panic!();
                 }
-                while !load_req.get_load_req().done.get() {
+                while !load_req.get_load_req_ref().done.get() {
                     mem_dut.tick();
                 }
                 for i in 0..access_length {
                     assert_eq!(
-                        load_req.get_load_req().buffer.borrow()[i],
+                        load_req.get_load_req_ref().buffer.borrow()[i],
                         random_store_data[i]
                     );
                 }
