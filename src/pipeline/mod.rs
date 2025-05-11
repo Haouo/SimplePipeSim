@@ -1,4 +1,3 @@
-pub mod bus;
 pub mod clock;
 pub mod mem;
 pub mod pipe;
