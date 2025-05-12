@@ -33,11 +33,12 @@ pub struct FiveStagePipeStage {
     mem_is_waiting: Option<MemoryReqType>,
 
     // information for branch misprediction
-    branch_recovery: bool,
-    branch_flushes: u8,
+    branch_recover: bool,
+    branch_destination: u32,
+    branch_flushes: usize,
 
     // imitate stall for integer mul/div instructions
-    int_mul_div_stall: u8,
+    int_mul_div_stall_countdown: u8,
 
     // L1 Instruction Cache
     icache: Box<dyn AbstraceMemInterface>,
@@ -59,9 +60,10 @@ impl FiveStagePipeStage {
             wb_op: None,
             if_is_wating: None,
             mem_is_waiting: None,
-            branch_recovery: false,
+            branch_recover: false,
+            branch_destination: 0,
             branch_flushes: 0,
-            int_mul_div_stall: 0,
+            int_mul_div_stall_countdown: 0,
             // todo: modify the cache parameters
             icache: Box::new(GeneralCache::<fifo::FifoRP>::new(
                 4096,
@@ -77,6 +79,7 @@ impl FiveStagePipeStage {
             )),
         }
     }
+
     /// ### Instruction Fetch Pipeline Stage Function
     fn pipe_stage_fetch(&mut self) {
         // stall current stage, because downstream is stalled
@@ -98,7 +101,11 @@ impl FiveStagePipeStage {
                 .expect("The length of load data in IF stage should be 4.");
             let inst_raw_binary = u32::from_le_bytes(load_data);
             // put Instruction information into id_op and return
-            self.id_op.as_mut().unwrap().inst = Instruction::raw_binary_to_inst(inst_raw_binary);
+            self.id_op = Some(PreDecodeMicroOp {
+                inst: Instruction::raw_binary_to_inst(inst_raw_binary),
+                pc: self.if_pc,
+                ..Default::default()
+            });
             return;
         }
 
@@ -110,12 +117,142 @@ impl FiveStagePipeStage {
             buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
         });
         let icache_register_result = self.icache.try_register_req(&new_mem_load_req);
-        todo!();
+        assert!(
+            icache_register_result.is_ok(),
+            "The memory request to I$ should not fail, because the I$ is not shared.",
+        );
+
+        // whether the read request to I$ is done in the current cycle
+        if new_mem_load_req.get_done() {
+            // yes -> get inst and put it into self.id_op
+            let load_data: [u8; 4] = new_mem_load_req.get_load_req_ref().buffer.borrow()[0..=3]
+                .try_into()
+                .expect("The length of load data in IF stage should be 4");
+            let inst_raw_binary = u32::from_le_bytes(load_data);
+            self.id_op = Some(PreDecodeMicroOp {
+                inst: Instruction::raw_binary_to_inst(inst_raw_binary),
+                pc: self.if_pc,
+                ..Default::default()
+            });
+        } else {
+            // no -> stall IF stage and waiting for the request to be completed
+            self.if_is_wating = Some(new_mem_load_req);
+        }
     }
 
     /// ### Instruction Decode Pipeline Stage Function
+    ///
+    /// In the ID-stage, it pre-decodes the instruction from IF-stage into PreDecodeMicroOp with necessary information.
+    /// IT can help the latter stages to perform specific operations without complex decoding logic.
     fn pipe_stage_decode(&mut self) {
-        todo!();
+        // stall current stage if downstream stage are stalled
+        if self.mem_op.is_some() {
+            return;
+        }
+
+        // perform pre-decoding logic
+        let mut current_op = self.id_op.take().unwrap();
+        let inst_ref = &current_op.inst;
+
+        // stage 1 pre-decode (coarse-grained)
+        match inst_ref {
+            // OP
+            Instruction::Add(inst)
+            | Instruction::Sub(inst)
+            | Instruction::Sll(inst)
+            | Instruction::Slt(inst)
+            | Instruction::Sltu(inst)
+            | Instruction::Xor(inst)
+            | Instruction::Srl(inst)
+            | Instruction::Sra(inst)
+            | Instruction::Or(inst)
+            | Instruction::And(inst) => {
+                current_op.rs1 = Some((inst.rs1(), None));
+                current_op.rs2 = Some((inst.rs2(), None));
+                current_op.wb_sel = WriteBackSelect::AluOut;
+            }
+
+            // OP-IMM
+            Instruction::Addi(inst)
+            | Instruction::Slti(inst)
+            | Instruction::Sltiu(inst)
+            | Instruction::Xori(inst)
+            | Instruction::Ori(inst)
+            | Instruction::Andi(inst)
+            | Instruction::Slli(inst)
+            | Instruction::Srli(inst)
+            | Instruction::Srai(inst) => {
+                current_op.rs1 = Some((inst.rs1(), None));
+                current_op.immediate_signext = inst.imm_sign_ext();
+                current_op.wb_sel = WriteBackSelect::AluOut;
+            }
+
+            // LOAD
+            Instruction::Lb(inst)
+            | Instruction::Lh(inst)
+            | Instruction::Lw(inst)
+            | Instruction::Lbu(inst)
+            | Instruction::Lhu(inst) => {
+                current_op.rs1 = Some((inst.rs1(), None));
+                current_op.immediate_signext = inst.imm_sign_ext();
+                current_op.rd = Some((inst.rd(), None));
+                current_op.is_mem = true;
+                current_op.wb_sel = WriteBackSelect::LoadData;
+            }
+
+            // STORE
+            Instruction::Sb(inst) | Instruction::Sh(inst) | Instruction::Sw(inst) => {
+                current_op.rs1 = Some((inst.rs1(), Some(self.id_regs[inst.rs1() as usize])));
+                current_op.rs1 = Some((inst.rs2(), Some(self.id_regs[inst.rs2() as usize])));
+                current_op.alu_op_type = AluOpTypes::Add;
+                current_op.is_mem = true;
+                current_op.is_store = true;
+            }
+
+            // BRANCH
+            Instruction::Beq(inst)
+            | Instruction::Bne(inst)
+            | Instruction::Blt(inst)
+            | Instruction::Bge(inst)
+            | Instruction::Bltu(inst)
+            | Instruction::Bgeu(inst) => {
+                current_op.rs1 = Some((inst.rs1(), Some(self.id_regs[inst.rs1() as usize])));
+                current_op.rs2 = Some((inst.rs2(), Some(self.id_regs[inst.rs2() as usize])));
+                current_op.is_branch = true;
+            }
+
+            // JAL
+            Instruction::Jal(inst) => {
+                current_op.immediate_signext = inst.sign_ext();
+                current_op.rd = Some((inst.rd(), Some(self.id_regs[inst.rd() as usize])));
+                current_op.wb_sel = WriteBackSelect::PcPlus4;
+                current_op.is_branch = true;
+                current_op.branch_taken = true;
+            }
+            // JALR
+            Instruction::Jalr(inst) => {
+                //
+            }
+
+            // LUI
+            Instruction::Lui(inst) => {
+                //
+            }
+            // AUIPC
+            Instruction::Auipc(inst) => {
+                //
+            }
+
+            // FENCE
+            // SYSTEM
+            _ => unreachable!(),
+        }
+
+        // stage 2 pre-decode (fine-grained)
+        match inst_ref {
+            // @TODO
+            _ => {}
+        }
     }
 
     /// ### Instruction Execute Pipeline Stage Function
