@@ -1,3 +1,5 @@
+use crate::riscv::instruction::Instruction;
+
 use super::clock::Clocked;
 use super::mem::abstract_mem::*;
 use super::mem::general_cache::replacement_policy::fifo;
@@ -5,7 +7,7 @@ use super::mem::general_cache::GeneralCache;
 use super::mem::simple_mem::SimpleMem;
 use super::uop::*;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// # Public struct `PipeState`
@@ -27,7 +29,7 @@ pub struct FiveStagePipeStage {
     wb_op: Option<PreDecodeMicroOp>,
 
     // waiting information about memory related stages (ID and MEM)
-    id_is_wating: Option<MemoryReqType>,
+    if_is_wating: Option<MemoryReqType>,
     mem_is_waiting: Option<MemoryReqType>,
 
     // information for branch misprediction
@@ -55,7 +57,7 @@ impl FiveStagePipeStage {
             exe_op: None,
             mem_op: None,
             wb_op: None,
-            id_is_wating: None,
+            if_is_wating: None,
             mem_is_waiting: None,
             branch_recovery: false,
             branch_flushes: 0,
@@ -77,17 +79,50 @@ impl FiveStagePipeStage {
     }
     /// ### Instruction Fetch Pipeline Stage Function
     fn pipe_stage_fetch(&mut self) {
+        // stall current stage, because downstream is stalled
+        if self.id_op.is_some() {
+            return;
+        }
+
+        // handle inflight instruction fetching operation
+        if self.if_is_wating.is_some() {
+            // check whether the inst. fetching memory request is done
+            if !self.if_is_wating.as_ref().unwrap().get_done() {
+                return;
+            }
+
+            // memory load request is done
+            let if_mem_ref = self.if_is_wating.take().unwrap();
+            let load_data: [u8; 4] = if_mem_ref.get_load_req_ref().buffer.borrow()[0..=3]
+                .try_into()
+                .expect("The length of load data in IF stage should be 4.");
+            let inst_raw_binary = u32::from_le_bytes(load_data);
+            // put Instruction information into id_op and return
+            self.id_op.as_mut().unwrap().inst = Instruction::raw_binary_to_inst(inst_raw_binary);
+            return;
+        }
+
+        // handle new instruction fetching operation
+        let new_mem_load_req = MemoryReqType::Load(MemoryLoadReq {
+            addr: self.if_pc, // use IF-stage PC as fetching base address
+            len: 4,           // no compressed inst.
+            done: Rc::new(Cell::new(false)),
+            buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
+        });
+        let icache_register_result = self.icache.try_register_req(&new_mem_load_req);
         todo!();
-        // read instruction from icache
     }
+
     /// ### Instruction Decode Pipeline Stage Function
     fn pipe_stage_decode(&mut self) {
         todo!();
     }
+
     /// ### Instruction Execute Pipeline Stage Function
     fn pipe_stage_exe(&mut self) {
         todo!();
     }
+
     /// ### Memory Access Pipeline Stage Function
     fn pipe_stage_mem(&mut self) {
         // stall
@@ -103,7 +138,7 @@ impl FiveStagePipeStage {
             }
 
             // if the memory request has been done
-            // @TODO
+            //
 
             return;
         }
@@ -111,6 +146,7 @@ impl FiveStagePipeStage {
         // handle new load/store instruction
         let current_op = self.mem_op.take().unwrap();
     }
+
     /// ### Architectural Register File Write-back Pipeline Stage Function
     fn pipe_stage_wb(&mut self) {
         // stall
@@ -127,6 +163,7 @@ impl FiveStagePipeStage {
             }
         }
     }
+
     /// ### Branch Recovering Stage when meeting branch mis-prediction
     fn pipe_branch_recover(&mut self) {
         todo!();

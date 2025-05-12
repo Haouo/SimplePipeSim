@@ -1,7 +1,7 @@
 use crate::riscv::instruction::Instruction;
 
 /// The data type representing a Index-Value-Pair for general purpose registers in RISC-V ISA.
-/// This can represent rs1, rs2 or rd. It can also be None, bacause not all instructions have rs1, rs2 or rd.
+/// This can represent rs1, rs2 or rd. It can also be None, because not all instructions have rs1, rs2 or rd.
 ///
 /// Due to characteristics of pipeline processor that the destination values is not always ready.
 /// Hence, the second fields of the tuple wrapped by Option<...> is also a Option (Option<u32>), and it can be None

@@ -80,7 +80,7 @@ impl Default for Instruction {
 }
 
 impl Instruction {
-    pub fn decode(raw_inst: u32) -> Self {
+    pub fn raw_binary_to_inst(raw_inst: u32) -> Self {
         let opcode = raw_inst & 0x7f;
         assert!(
             (opcode & 0b11) == 0b11,
