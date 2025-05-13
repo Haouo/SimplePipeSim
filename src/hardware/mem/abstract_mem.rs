@@ -69,6 +69,6 @@ impl MemoryReqType {
 /// like L1-Cache, L2-Cache and Main Memory (DRAM)
 ///
 /// the generic parameter `T` represents the granularity for manipulation the memory device
-pub trait AbstraceMemInterface {
+pub trait AbstractMemoryInterface {
     fn try_register_req(&mut self, req: &MemoryReqType) -> Result<(), ()>;
 }

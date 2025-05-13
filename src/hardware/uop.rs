@@ -37,6 +37,7 @@ pub struct PreDecodeMicroOp {
     // basic info
     pub inst: Instruction, // generated in IF
     pub pc: u32,           // generated in IF
+    pub opcode: u8,        // generated in IF
 
     // register sources information
     pub rs1: RegisterIndexValuePair, // might be generated in ID

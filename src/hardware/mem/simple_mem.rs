@@ -1,5 +1,5 @@
-use crate::pipeline::clock::Clocked;
-use crate::pipeline::mem::abstract_mem::*;
+use crate::hardware::clock::Clocked;
+use crate::hardware::mem::abstract_mem::*;
 
 const MEM_SIZE: usize = 0x100000;
 const MAIN_MEM_LATENCY: usize = 50; // each memory access takes 50 cycles to finish
@@ -36,7 +36,7 @@ impl SimpleMem {
     }
 }
 
-impl AbstraceMemInterface for SimpleMem {
+impl AbstractMemoryInterface for SimpleMem {
     /// # try_register_req for SimpleMem
     ///
     /// The unified memory request try-register function for SimpleMem.

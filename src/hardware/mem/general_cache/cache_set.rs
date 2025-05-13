@@ -1,5 +1,3 @@
-use object::bytes_of;
-
 use super::replacement_policy::ReplacementPolicy;
 
 pub struct GeneralCacheSetUnit<RP>

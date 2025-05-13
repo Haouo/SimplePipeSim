@@ -1,4 +1,4 @@
-mod pipeline;
+mod hardware;
 mod riscv;
 mod sim;
 

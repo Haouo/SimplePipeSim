@@ -1,3 +1,4 @@
+use crate::riscv::encoding::*;
 use crate::riscv::instruction::Instruction;
 
 use super::clock::Clocked;
@@ -41,9 +42,9 @@ pub struct FiveStagePipeStage {
     int_mul_div_stall_countdown: u8,
 
     // L1 Instruction Cache
-    icache: Box<dyn AbstraceMemInterface>,
+    icache: Box<dyn AbstractMemoryInterface>,
     // l1 data cache
-    dcache: Box<dyn AbstraceMemInterface>,
+    dcache: Box<dyn AbstractMemoryInterface>,
 }
 
 impl FiveStagePipeStage {
@@ -64,7 +65,7 @@ impl FiveStagePipeStage {
             branch_destination: 0,
             branch_flushes: 0,
             int_mul_div_stall_countdown: 0,
-            // todo: modify the cache parameters
+            // I$ configuration: 4096 bytes in total, 4-way associativity, 32 bytes for each block (implies 32 sets)
             icache: Box::new(GeneralCache::<fifo::FifoRP>::new(
                 4096,
                 4,
@@ -104,6 +105,7 @@ impl FiveStagePipeStage {
             self.id_op = Some(PreDecodeMicroOp {
                 inst: Instruction::raw_binary_to_inst(inst_raw_binary),
                 pc: self.if_pc,
+                opcode: (inst_raw_binary & 0x7f) as u8,
                 ..Default::default()
             });
             return;
@@ -132,6 +134,7 @@ impl FiveStagePipeStage {
             self.id_op = Some(PreDecodeMicroOp {
                 inst: Instruction::raw_binary_to_inst(inst_raw_binary),
                 pc: self.if_pc,
+                opcode: (inst_raw_binary & 0x7f) as u8,
                 ..Default::default()
             });
         } else {
@@ -231,7 +234,7 @@ impl FiveStagePipeStage {
             }
             // JALR
             Instruction::Jalr(inst) => {
-                //
+                current_op.immediate_signext = inst.imm_sign_ext();
             }
 
             // LUI
@@ -250,7 +253,7 @@ impl FiveStagePipeStage {
 
         // stage 2 pre-decode (fine-grained)
         match inst_ref {
-            // @TODO
+            // decode for ALU Operation Types
             _ => {}
         }
     }

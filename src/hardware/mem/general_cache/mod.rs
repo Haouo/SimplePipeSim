@@ -1,9 +1,9 @@
 pub mod cache_set;
 pub mod replacement_policy;
 
-use crate::pipeline::clock::Clocked;
-use crate::pipeline::mem::abstract_mem::*;
-use crate::pipeline::mem::simple_mem::SimpleMem;
+use crate::hardware::clock::Clocked;
+use crate::hardware::mem::abstract_mem::*;
+use crate::hardware::mem::simple_mem::SimpleMem;
 use cache_set::GeneralCacheSetUnit;
 use replacement_policy::ReplacementPolicy;
 
@@ -94,7 +94,7 @@ impl<RP: ReplacementPolicy> GeneralCache<RP> {
     }
 }
 
-impl<RP: ReplacementPolicy> AbstraceMemInterface for GeneralCache<RP> {
+impl<RP: ReplacementPolicy> AbstractMemoryInterface for GeneralCache<RP> {
     fn try_register_req(&mut self, req: &MemoryReqType) -> Result<(), ()> {
         // check address alignment
         let mut alignment_check: bool = true;
@@ -334,9 +334,9 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
-    use crate::pipeline::clock::Clocked;
-    use crate::pipeline::mem::general_cache::replacement_policy::fifo::FifoRP;
-    use crate::pipeline::mem::simple_mem::SimpleMem;
+    use crate::hardware::clock::Clocked;
+    use crate::hardware::mem::general_cache::replacement_policy::fifo::FifoRP;
+    use crate::hardware::mem::simple_mem::SimpleMem;
 
     use rand::Rng;
 
