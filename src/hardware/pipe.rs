@@ -1,5 +1,4 @@
-use crate::riscv::encoding::*;
-use crate::riscv::instruction::Instruction;
+use crate::riscv::instruction::{self, Instruction};
 
 use super::clock::Clocked;
 use super::mem::abstract_mem::*;
@@ -9,7 +8,9 @@ use super::mem::simple_mem::SimpleMem;
 use super::uop::*;
 
 use std::cell::{Cell, RefCell};
+use std::os::linux::raw;
 use std::rc::Rc;
+use std::thread::current;
 
 /// # Public struct `PipeState`
 ///
@@ -157,7 +158,7 @@ impl FiveStagePipeStage {
         let mut current_op = self.id_op.take().unwrap();
         let inst_ref = &current_op.inst;
 
-        // stage 1 pre-decode (coarse-grained)
+        // Pre-decode
         match inst_ref {
             // OP
             Instruction::Add(inst)
@@ -169,9 +170,20 @@ impl FiveStagePipeStage {
             | Instruction::Srl(inst)
             | Instruction::Sra(inst)
             | Instruction::Or(inst)
-            | Instruction::And(inst) => {
-                current_op.rs1 = Some((inst.rs1(), None));
-                current_op.rs2 = Some((inst.rs2(), None));
+            | Instruction::And(inst)
+            | Instruction::Mul(inst)
+            | Instruction::Mulh(inst)
+            | Instruction::Mulhu(inst)
+            | Instruction::Mulhsu(inst)
+            | Instruction::Div(inst)
+            | Instruction::Divu(inst)
+            | Instruction::Rem(inst)
+            | Instruction::Remu(inst) => {
+                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
+                current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
+                current_op.rd_index = inst.rd();
+                current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
+                current_op.alu_op2_sel = AluOpTwoSelect::RegRs2;
                 current_op.wb_sel = WriteBackSelect::AluOut;
             }
 
@@ -185,8 +197,11 @@ impl FiveStagePipeStage {
             | Instruction::Slli(inst)
             | Instruction::Srli(inst)
             | Instruction::Srai(inst) => {
-                current_op.rs1 = Some((inst.rs1(), None));
+                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
                 current_op.immediate_signext = inst.imm_sign_ext();
+                current_op.rd_index = inst.rd();
+                current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
+                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.wb_sel = WriteBackSelect::AluOut;
             }
 
@@ -196,20 +211,27 @@ impl FiveStagePipeStage {
             | Instruction::Lw(inst)
             | Instruction::Lbu(inst)
             | Instruction::Lhu(inst) => {
-                current_op.rs1 = Some((inst.rs1(), None));
+                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
                 current_op.immediate_signext = inst.imm_sign_ext();
-                current_op.rd = Some((inst.rd(), None));
+                current_op.rd_index = inst.rd();
+                current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
+                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                current_op.alu_op_type = AluOpTypes::Add;
                 current_op.is_mem = true;
                 current_op.wb_sel = WriteBackSelect::LoadData;
             }
 
             // STORE
             Instruction::Sb(inst) | Instruction::Sh(inst) | Instruction::Sw(inst) => {
-                current_op.rs1 = Some((inst.rs1(), Some(self.id_regs[inst.rs1() as usize])));
-                current_op.rs1 = Some((inst.rs2(), Some(self.id_regs[inst.rs2() as usize])));
+                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
+                current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
+                current_op.immediate_signext = inst.sign_ext();
+                current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
+                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_op_type = AluOpTypes::Add;
                 current_op.is_mem = true;
                 current_op.is_store = true;
+                current_op.wb_sel = WriteBackSelect::WriteBackDisable;
             }
 
             // BRANCH
@@ -219,43 +241,81 @@ impl FiveStagePipeStage {
             | Instruction::Bge(inst)
             | Instruction::Bltu(inst)
             | Instruction::Bgeu(inst) => {
-                current_op.rs1 = Some((inst.rs1(), Some(self.id_regs[inst.rs1() as usize])));
-                current_op.rs2 = Some((inst.rs2(), Some(self.id_regs[inst.rs2() as usize])));
+                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
+                current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
+                current_op.immediate_signext = inst.sign_ext();
+                current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
+                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                current_op.alu_op_type = AluOpTypes::Add;
                 current_op.is_branch = true;
             }
 
             // JAL
             Instruction::Jal(inst) => {
                 current_op.immediate_signext = inst.sign_ext();
-                current_op.rd = Some((inst.rd(), Some(self.id_regs[inst.rd() as usize])));
+                current_op.rd_index = inst.rd();
+                current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
+                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                current_op.alu_op_type = AluOpTypes::Add;
                 current_op.wb_sel = WriteBackSelect::PcPlus4;
                 current_op.is_branch = true;
-                current_op.branch_taken = true;
             }
             // JALR
             Instruction::Jalr(inst) => {
+                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
                 current_op.immediate_signext = inst.imm_sign_ext();
+                current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
+                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                current_op.alu_op_type = AluOpTypes::Add;
+                current_op.wb_sel = WriteBackSelect::PcPlus4;
+                current_op.is_branch = true;
             }
 
             // LUI
             Instruction::Lui(inst) => {
-                //
+                current_op.rd_index = inst.rd();
+                current_op.immediate_signext = inst.sign_ext();
+                current_op.alu_op1_sel = AluOpOneSelect::Zero;
+                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                current_op.alu_op_type = AluOpTypes::Add;
+                current_op.wb_sel = WriteBackSelect::AluOut;
             }
+
             // AUIPC
             Instruction::Auipc(inst) => {
-                //
+                current_op.rd_index = inst.rd();
+                current_op.immediate_signext = inst.sign_ext();
+                current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
+                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                current_op.alu_op_type = AluOpTypes::Add;
+                current_op.wb_sel = WriteBackSelect::AluOut;
             }
 
             // FENCE
+            Instruction::Fence(inst) => {
+                todo!();
+            }
+
             // SYSTEM
-            _ => unreachable!(),
+            Instruction::Ecall(inst) => {
+                current_op.is_env_call = true;
+            }
+
+            Instruction::Illegal(raw_inst) => panic!("Unknown instruction: {:#08X}", raw_inst),
         }
 
-        // stage 2 pre-decode (fine-grained)
+        // stage 2 pre-decode (fine-grained) for OP and OP-IMM OPCODE types
+        // it decides the ALU Operation types
         match inst_ref {
-            // decode for ALU Operation Types
+            Instruction::Add(_) | Instruction::Addi(_) => current_op.alu_op_type = AluOpTypes::Add,
+            Instruction::Sub(_) => current_op.alu_op_type = AluOpTypes::Sub,
             _ => {}
         }
+
+        // **Ps**
+        // In hardware implementation, stage 1 and 2 can be implemented in parallel.
+        // In other words, the hardware decoder can have two parallel decoding path.
+        // The first performs common decoding logics, and the second performs specific decoding logic for determining ALU OP-Types.
     }
 
     /// ### Instruction Execute Pipeline Stage Function
@@ -265,7 +325,7 @@ impl FiveStagePipeStage {
 
     /// ### Memory Access Pipeline Stage Function
     fn pipe_stage_mem(&mut self) {
-        // stall
+        // stall if there is no any job to do
         if self.mem_op.is_none() {
             return;
         }
@@ -289,18 +349,25 @@ impl FiveStagePipeStage {
 
     /// ### Architectural Register File Write-back Pipeline Stage Function
     fn pipe_stage_wb(&mut self) {
-        // stall
+        // stall if there is o any job to do
         if self.wb_op.is_none() {
             return;
         }
 
         let current_op = self.wb_op.take().unwrap();
-        if current_op.rd.is_some() {
-            let rd_index = current_op.rd.as_ref().unwrap().0;
-            // need to write-back to register file
-            if rd_index != 0 {
-                self.id_regs[rd_index as usize] = current_op.rd.as_ref().unwrap().1.unwrap();
+        match current_op.wb_sel {
+            WriteBackSelect::AluOut if current_op.rd_index != 0 => {
+                self.id_regs[current_op.rd_index as usize] = current_op.alu_result
             }
+            WriteBackSelect::LoadData if current_op.rd_index != 0 => {
+                self.id_regs[current_op.rd_index as usize] = current_op.mem_load_value.expect(
+                    "The mem_load_value of a load instruction should not be None in WB stage.",
+                );
+            }
+            WriteBackSelect::PcPlus4 if current_op.rd_index != 0 => {
+                self.id_regs[current_op.rd_index as usize] = current_op.pc + 4;
+            }
+            _ => {}
         }
     }
 

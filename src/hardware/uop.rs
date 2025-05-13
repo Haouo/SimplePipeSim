@@ -1,13 +1,5 @@
 use crate::riscv::instruction::Instruction;
 
-/// The data type representing a Index-Value-Pair for general purpose registers in RISC-V ISA.
-/// This can represent rs1, rs2 or rd. It can also be None, because not all instructions have rs1, rs2 or rd.
-///
-/// Due to characteristics of pipeline processor that the destination values is not always ready.
-/// Hence, the second fields of the tuple wrapped by Option<...> is also a Option (Option<u32>), and it can be None
-/// if the destination value (the value to be written-back) is not ready.
-type RegisterIndexValuePair = Option<(u8, Option<u32>)>;
-
 #[derive(Default)]
 pub enum AluOpTypes {
     #[default]
@@ -21,6 +13,27 @@ pub enum AluOpTypes {
     And,
     Sub,
     Sra,
+    Mul,
+    Mulu,
+    Div,
+    Divu,
+    Rem,
+    Remu,
+}
+
+#[derive(Default)]
+pub enum AluOpOneSelect {
+    #[default]
+    RegRs1,
+    CurrentPc,
+    Zero,
+}
+
+#[derive(Default)]
+pub enum AluOpTwoSelect {
+    #[default]
+    RegRs2,
+    ImmSignExt,
 }
 
 #[derive(Default)]
@@ -29,7 +42,7 @@ pub enum WriteBackSelect {
     PcPlus4,
     AluOut,
     #[default]
-    WriteDiable,
+    WriteBackDisable,
 }
 
 #[derive(Default)]
@@ -40,19 +53,19 @@ pub struct PreDecodeMicroOp {
     pub opcode: u8,        // generated in IF
 
     // register sources information
-    pub rs1: RegisterIndexValuePair, // might be generated in ID
-    pub rs2: RegisterIndexValuePair, // might be generated in ID
-    pub immediate_signext: u32,      // might be generated in ID
+    pub rs1: Option<(u8, u32)>, // might be generated in ID
+    pub rs2: Option<(u8, u32)>, // might be generated in ID
+    pub immediate_signext: u32, // might be generated in ID
 
     // EXE stage output
-    pub alu_op_type: AluOpTypes, // generated in ID
-    pub alu_result: u32,         // generated in EXE
+    pub alu_op_type: AluOpTypes,     // generated in ID
+    pub alu_op1_sel: AluOpOneSelect, // generated in ID
+    pub alu_op2_sel: AluOpTwoSelect, // generated in ID
+    pub alu_result: u32,             // generated in EXE
 
     // register destination information
     // The index of rd is generated in ID,
-    // while the time of generation of the actual value of rd
-    // depends on the instructin and pipeline itself.
-    pub rd: RegisterIndexValuePair,
+    pub rd_index: u8,
 
     // whether it is memory access instruction
     pub is_mem: bool,                 // generated in ID
@@ -69,4 +82,7 @@ pub struct PreDecodeMicroOp {
     pub is_branch: bool,     // generated in ID
     pub branch_taken: bool,  // determined in ID or EXE, depends on whether it's conditional branch
     pub target_address: u32, // calculated in EXE as well
+
+    // is environment call
+    pub is_env_call: bool, // generated in ID
 }
