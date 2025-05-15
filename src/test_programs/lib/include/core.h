@@ -7,9 +7,9 @@
 #define SYS_PUTC 1
 
 static inline void __internal_syscall(uint64_t arg0, uint64_t arg1) {
-    register uint64_t a0 asm("a0") = arg0;
-    register uint64_t a1 asm("a1") = arg1;
-    asm volatile("ecall" ::"r"(a0), "r"(a1) :);
+  register uint64_t a0 asm("a0") = arg0;
+  register uint64_t a1 asm("a1") = arg1;
+  asm volatile("ecall" ::"r"(a0), "r"(a1) :);
 }
 
 #define SYSCALL_1(A0) __internal_syscall(A0, 0)

@@ -61,7 +61,7 @@ pub struct PreDecodeMicroOp {
     pub alu_op_type: AluOpTypes,     // generated in ID
     pub alu_op1_sel: AluOpOneSelect, // generated in ID
     pub alu_op2_sel: AluOpTwoSelect, // generated in ID
-    pub alu_result: u32,             // generated in EXE
+    pub alu_result: Option<u32>, // generated in EXE (the pipeline might take many cycles to calculate)
 
     // register destination information
     // The index of rd is generated in ID,

@@ -1,4 +1,4 @@
-use crate::riscv::instruction::{self, Instruction};
+use crate::riscv::instruction::Instruction;
 
 use super::clock::Clocked;
 use super::mem::abstract_mem::*;
@@ -8,7 +8,6 @@ use super::mem::simple_mem::SimpleMem;
 use super::uop::*;
 
 use std::cell::{Cell, RefCell};
-use std::os::linux::raw;
 use std::rc::Rc;
 use std::thread::current;
 
@@ -150,7 +149,11 @@ impl FiveStagePipeStage {
     /// IT can help the latter stages to perform specific operations without complex decoding logic.
     fn pipe_stage_decode(&mut self) {
         // stall current stage if downstream stage are stalled
-        if self.mem_op.is_some() {
+        if self.exe_op.is_some() {
+            return;
+        }
+        // stall if `self.id_op` is not ready (means that ID stage is still waiting for I$)
+        if self.id_op.is_none() {
             return;
         }
 
@@ -307,8 +310,33 @@ impl FiveStagePipeStage {
         // stage 2 pre-decode (fine-grained) for OP and OP-IMM OPCODE types
         // it decides the ALU Operation types
         match inst_ref {
+            // Addition
             Instruction::Add(_) | Instruction::Addi(_) => current_op.alu_op_type = AluOpTypes::Add,
+            // Subtraction
             Instruction::Sub(_) => current_op.alu_op_type = AluOpTypes::Sub,
+            // Shift Left Logically
+            Instruction::Sll(_) | Instruction::Slli(_) => current_op.alu_op_type = AluOpTypes::Sll,
+            // Set on Less-than
+            Instruction::Slt(_) | Instruction::Slti(_) => current_op.alu_op_type = AluOpTypes::Slt,
+            // Set on Less-than Unsigned
+            Instruction::Sltu(_) | Instruction::Sltiu(_) => {
+                current_op.alu_op_type = AluOpTypes::Sltu
+            }
+            // Bitwise XOR
+            Instruction::Xor(_) | Instruction::Xori(_) => current_op.alu_op_type = AluOpTypes::Xor,
+            // Shift Right Logically
+            Instruction::Srl(_) | Instruction::Srli(_) => current_op.alu_op_type = AluOpTypes::Srl,
+            // Shift Right Arithmetically
+            Instruction::Sra(_) | Instruction::Srai(_) => current_op.alu_op_type = AluOpTypes::Sra,
+            // Bitwise AND
+            Instruction::And(_) | Instruction::Andi(_) => current_op.alu_op_type = AluOpTypes::And,
+            // Mul
+            // Mul Unsigned
+            // Div
+            // Div Unsigned
+            // Modulo
+            // Modulo Unsigned
+            // @TODO
             _ => {}
         }
 
@@ -320,7 +348,38 @@ impl FiveStagePipeStage {
 
     /// ### Instruction Execute Pipeline Stage Function
     fn pipe_stage_exe(&mut self) {
-        todo!();
+        // decrease Mul/Div/Rem countdown counter in need, and stall if the counter is not zero
+        if self.int_mul_div_stall_countdown > 0 {
+            self.int_mul_div_stall_countdown -= 1;
+            return;
+        }
+        // stall EXE stage if downstream is stalled
+        if self.mem_op.is_some() {
+            return;
+        }
+        // stall EXE stage if ID stage did not complete his job in last cycle
+        if self.exe_op.is_none() {
+            return;
+        }
+
+        let exe_op_ref = self.exe_op.as_ref().unwrap();
+
+        // __forwarding detection logics__
+        // In this implementation, it exists two possible forwarding path.
+        // One is MEM-to-EXE path, and the source of newest reg. value is mem_op.alu_out,
+        // and the other is WB-to-EXE path, and the source of the newest reg. value is write-back value in WB stage.
+        // check whether it must forward reg. rs1 value
+        if exe_op_ref.rs1.is_some() && (exe_op_ref.rs1.unwrap().0 != 0) {
+            // load-use hazard -> make it become EXE-WB hazard
+            // for other cases, just forward
+        }
+        // check whether it must forward reg. rs2 value
+        if exe_op_ref.rs2.is_some() && (exe_op_ref.rs2.unwrap().0 != 0) {
+            // load-use hazard -> make it become EXE-WB hazard
+            // for other cases, just forward
+        }
+
+        // forwarding detect
     }
 
     /// ### Memory Access Pipeline Stage Function
