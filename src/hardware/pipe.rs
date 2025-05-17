@@ -9,7 +9,6 @@ use super::uop::*;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::thread::current;
 
 /// # Public struct `PipeState`
 ///
