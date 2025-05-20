@@ -1,4 +1,6 @@
+#[derive(Default)]
 pub enum OpcodeMap {
+    #[default]
     Op,
     OpImm,
     Load,

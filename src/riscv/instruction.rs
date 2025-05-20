@@ -2,6 +2,7 @@ use super::encoding::OpcodeMap;
 use super::format_types::*;
 
 /// Enumeration of all supported instructions (RV32IM without Privileged Arch.)
+#[derive(Clone, Copy)]
 pub enum Instruction {
     //LUI
     Lui(UType),

@@ -1,3 +1,4 @@
+use crate::riscv::encoding::OpcodeMap;
 use crate::riscv::instruction::Instruction;
 
 use super::branch_predictor::{BranchPredictResult, BranchPredictor};
@@ -117,7 +118,6 @@ impl FiveStagePipeStage {
             self.id_op = Some(PreDecodeMicroOp {
                 inst: Instruction::raw_binary_to_inst(inst_raw_binary),
                 pc: if_mem_ref.get_addr(), // record PC of the inst.
-                opcode: (inst_raw_binary & 0x7f) as u8,
                 ..Default::default()
             });
             // update current if_pc according to branch prediction result
@@ -152,7 +152,6 @@ impl FiveStagePipeStage {
             self.id_op = Some(PreDecodeMicroOp {
                 inst: Instruction::raw_binary_to_inst(inst_raw_binary),
                 pc: new_mem_load_req.get_addr(),
-                opcode: (inst_raw_binary & 0x7f) as u8,
                 ..Default::default()
             });
             // udpate if_pc
@@ -212,10 +211,9 @@ impl FiveStagePipeStage {
             | Instruction::Remu(inst) => {
                 current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
                 current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
-                current_op.rd_index = inst.rd();
+                current_op.rd_index = Some(inst.rd());
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                current_op.alu_op2_sel = AluOpTwoSelect::RegRs2;
-                current_op.wb_sel = WriteBackSelect::AluOut;
+                current_op.alu_op2_sel = AluOpTwoSelect::RegRs2
             }
 
             // OP-IMM
@@ -230,10 +228,9 @@ impl FiveStagePipeStage {
             | Instruction::Srai(inst) => {
                 current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
                 current_op.immediate_signext = inst.imm_sign_ext();
-                current_op.rd_index = inst.rd();
+                current_op.rd_index = Some(inst.rd());
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.wb_sel = WriteBackSelect::AluOut;
             }
 
             // LOAD
@@ -244,12 +241,11 @@ impl FiveStagePipeStage {
             | Instruction::Lhu(inst) => {
                 current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
                 current_op.immediate_signext = inst.imm_sign_ext();
-                current_op.rd_index = inst.rd();
+                current_op.rd_index = Some(inst.rd());
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_op_type = AluOpTypes::Add;
                 current_op.is_mem = true;
-                current_op.wb_sel = WriteBackSelect::LoadData;
             }
 
             // STORE
@@ -262,7 +258,6 @@ impl FiveStagePipeStage {
                 current_op.alu_op_type = AluOpTypes::Add;
                 current_op.is_mem = true;
                 current_op.is_store = true;
-                current_op.wb_sel = WriteBackSelect::WriteBackDisable;
             }
 
             // BRANCH
@@ -284,11 +279,11 @@ impl FiveStagePipeStage {
             // JAL
             Instruction::Jal(inst) => {
                 current_op.immediate_signext = inst.sign_ext();
-                current_op.rd_index = inst.rd();
+                current_op.rd_index = Some(inst.rd());
                 current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_op_type = AluOpTypes::Add;
-                current_op.wb_sel = WriteBackSelect::PcPlus4;
+                current_op.rd_write_value = Some(current_op.pc + 4);
                 current_op.is_branch = true;
             }
             // JALR
@@ -298,28 +293,26 @@ impl FiveStagePipeStage {
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_op_type = AluOpTypes::Add;
-                current_op.wb_sel = WriteBackSelect::PcPlus4;
+                current_op.rd_write_value = Some(current_op.pc + 4);
                 current_op.is_branch = true;
             }
 
             // LUI
             Instruction::Lui(inst) => {
-                current_op.rd_index = inst.rd();
+                current_op.rd_index = Some(inst.rd());
                 current_op.immediate_signext = inst.sign_ext();
                 current_op.alu_op1_sel = AluOpOneSelect::Zero;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_op_type = AluOpTypes::Add;
-                current_op.wb_sel = WriteBackSelect::AluOut;
             }
 
             // AUIPC
             Instruction::Auipc(inst) => {
-                current_op.rd_index = inst.rd();
+                current_op.rd_index = Some(inst.rd());
                 current_op.immediate_signext = inst.sign_ext();
                 current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_op_type = AluOpTypes::Add;
-                current_op.wb_sel = WriteBackSelect::AluOut;
             }
 
             // FENCE
@@ -453,25 +446,91 @@ impl FiveStagePipeStage {
 
         // handle current instruction in WB stage
         let current_op = self.wb_op.take().unwrap();
-        match current_op.wb_sel {
-            WriteBackSelect::AluOut if current_op.rd_index != 0 => {
-                self.id_regs[current_op.rd_index as usize] = current_op.alu_result.unwrap()
-            }
-            WriteBackSelect::LoadData if current_op.rd_index != 0 => {
-                self.id_regs[current_op.rd_index as usize] = current_op.mem_load_value.expect(
-                    "The mem_load_value of a load instruction should not be None in WB stage.",
-                );
-            }
-            WriteBackSelect::PcPlus4 if current_op.rd_index != 0 => {
-                self.id_regs[current_op.rd_index as usize] = current_op.pc + 4;
-            }
-            _ => {}
+        if current_op.rd_index.is_none() {
+            return;
         }
+        self.id_regs[current_op.rd_index.unwrap() as usize] = current_op.rd_write_value.expect(
+            "The write value into $rd register should not be None when rd_index is not None. It makes no sense.",
+        );
     }
 
     /// Try to solve RAW hazards before the start of a new cycle by using data forwarding
     fn pipe_data_forwarding(&mut self) -> bool {
-        // @TODO
+        let exe_op_mut_ref = self.exe_op.as_mut().unwrap();
+        // Check scenario 1: WB -> EXE Forwarding Path
+        if self
+            .wb_op
+            .as_ref()
+            .is_some_and(|x| x.rd_index.is_some_and(|x| x != 0))
+        {
+            let wb_rd_index = self.wb_op.as_ref().unwrap().rd_index.unwrap();
+            if exe_op_mut_ref.rs1.is_some_and(|x| x.0 == wb_rd_index) {
+                exe_op_mut_ref.rs1 = Some((
+                    exe_op_mut_ref.rs1.unwrap().0,
+                    self.wb_op.as_ref().unwrap().rd_write_value.unwrap(),
+                ));
+            }
+            if exe_op_mut_ref.rs2.is_some_and(|x| x.0 == wb_rd_index) {
+                exe_op_mut_ref.rs2 = Some((
+                    exe_op_mut_ref.rs2.unwrap().0,
+                    self.wb_op.as_ref().unwrap().rd_write_value.unwrap(),
+                ));
+            }
+        }
+
+        // Check scenario 2: MEM -> EXE Forwarding Path
+        // it might override the forwarding data of scenario 1
+        // because the latter instruction (in MEM stage) has newest data
+        if self
+            .mem_op
+            .as_ref()
+            .is_some_and(|x| x.rd_index.is_some_and(|x| x != 0))
+        {
+            let mem_rd_index = self.mem_op.as_ref().unwrap().rd_index.unwrap();
+            if exe_op_mut_ref.rs1.unwrap().0 == mem_rd_index {
+                //
+            }
+            if exe_op_mut_ref.rs2.unwrap().0 == mem_rd_index {
+                //
+            }
+        }
+
+        // check Load-Use Data Hazard
+        // firstly, check inst. at MEM stage is a load inst.
+        if self
+            .exe_op
+            .as_ref()
+            .is_some_and(|x| x.is_mem && (!x.is_store))
+        {
+            if self.id_op.is_some() {
+                let exe_rd_index = self
+                    .exe_op
+                    .as_ref()
+                    .unwrap()
+                    .rd_index
+                    .expect("Load instruction without rd index makes no sense.");
+                // if ID rs1 and Load inst. at EXE rd is overlap
+                if self
+                    .id_op
+                    .as_ref()
+                    .unwrap()
+                    .rs1
+                    .is_some_and(|x| x.0 == exe_rd_index)
+                {
+                    return true;
+                }
+                // if ID rs2 and Load inst. at EXE rd is overlap
+                if self
+                    .id_op
+                    .as_ref()
+                    .unwrap()
+                    .rs2
+                    .is_some_and(|x| x.0 == exe_rd_index)
+                {
+                    return true;
+                }
+            }
+        }
         false
     }
 }

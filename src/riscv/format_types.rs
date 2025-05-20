@@ -6,6 +6,7 @@ fn sign_ext(data: u32, bit_widtgh: usize) -> u32 {
     sign_ext_data as u32
 }
 
+#[derive(Clone, Copy)]
 pub struct RType(pub u32);
 impl RType {
     #[inline(always)]
@@ -30,6 +31,7 @@ impl RType {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct IType(pub u32);
 impl IType {
     #[inline(always)]
@@ -54,6 +56,7 @@ impl IType {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct SType(pub u32);
 impl SType {
     #[inline(always)]
@@ -83,6 +86,7 @@ impl SType {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct BType(pub u32);
 impl BType {
     #[inline(always)]
@@ -123,6 +127,7 @@ impl BType {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct UType(pub u32);
 impl UType {
     #[inline(always)]
@@ -139,6 +144,7 @@ impl UType {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct JType(pub u32);
 impl JType {
     #[inline(always)]
