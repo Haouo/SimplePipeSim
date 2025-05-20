@@ -1,5 +1,6 @@
 use crate::riscv::instruction::Instruction;
 
+use super::branch_predictor::{BranchPredictResult, BranchPredictor};
 use super::clock::Clocked;
 use super::mem::abstract_mem::*;
 use super::mem::general_cache::replacement_policy::fifo;
@@ -16,6 +17,7 @@ use std::rc::Rc;
 pub struct FiveStagePipeStage {
     // IF-Stage instruction fetch PC
     if_pc: u32,
+    branch_predictor: Box<dyn BranchPredictor>,
 
     // register file (be accessed in ID and WB)
     id_regs: [u32; 32],
@@ -29,7 +31,7 @@ pub struct FiveStagePipeStage {
     wb_op: Option<PreDecodeMicroOp>,
 
     // waiting information about memory related stages (ID and MEM)
-    if_is_wating: Option<MemoryReqType>,
+    if_is_waiting: (Option<MemoryReqType>, BranchPredictResult), // second variable is the branch prediction result of the IF PC
     mem_is_waiting: Option<MemoryReqType>,
 
     // information for branch misprediction
@@ -53,12 +55,19 @@ impl FiveStagePipeStage {
     pub fn new(init_pc: u32, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
         FiveStagePipeStage {
             if_pc: init_pc,
+            branch_predictor: Box::new(super::branch_predictor::DummyPredictor::Predictor),
             id_regs: [0; 32],
             id_op: None,
             exe_op: None,
             mem_op: None,
             wb_op: None,
-            if_is_wating: None,
+            if_is_waiting: (
+                None,
+                BranchPredictResult {
+                    direction: false,
+                    addr: None,
+                },
+            ),
             mem_is_waiting: None,
             branch_recover: false,
             branch_destination: 0,
@@ -83,19 +92,23 @@ impl FiveStagePipeStage {
     /// ### Instruction Fetch Pipeline Stage Function
     fn pipe_stage_fetch(&mut self) {
         // stall current stage, because downstream is stalled
-        if self.id_op.is_some() {
+        if self.id_op.is_some()
+            | self.exe_op.is_some()
+            | self.mem_op.is_some()
+            | self.wb_op.is_some()
+        {
             return;
         }
 
         // handle inflight instruction fetching operation
-        if self.if_is_wating.is_some() {
+        if self.if_is_waiting.0.is_some() {
             // check whether the inst. fetching memory request is done
-            if !self.if_is_wating.as_ref().unwrap().get_done() {
+            if !self.if_is_waiting.0.as_ref().unwrap().get_done() {
                 return;
             }
 
             // memory load request is done
-            let if_mem_ref = self.if_is_wating.take().unwrap();
+            let if_mem_ref = self.if_is_waiting.0.take().unwrap(); // note take() at here
             let load_data: [u8; 4] = if_mem_ref.get_load_req_ref().buffer.borrow()[0..=3]
                 .try_into()
                 .expect("The length of load data in IF stage should be 4.");
@@ -103,27 +116,33 @@ impl FiveStagePipeStage {
             // put Instruction information into id_op and return
             self.id_op = Some(PreDecodeMicroOp {
                 inst: Instruction::raw_binary_to_inst(inst_raw_binary),
-                pc: self.if_pc,
+                pc: if_mem_ref.get_addr(), // record PC of the inst.
                 opcode: (inst_raw_binary & 0x7f) as u8,
                 ..Default::default()
             });
+            // update current if_pc according to branch prediction result
+            if self.if_is_waiting.1.direction {
+                self.if_pc = self.if_is_waiting.1.addr.unwrap();
+            } else {
+                self.if_pc += 4;
+            }
             return;
         }
 
         // handle new instruction fetching operation
+        let branch_predict_result = self.branch_predictor.branch_predict(self.if_pc);
         let new_mem_load_req = MemoryReqType::Load(MemoryLoadReq {
             addr: self.if_pc, // use IF-stage PC as fetching base address
             len: 4,           // no compressed inst.
             done: Rc::new(Cell::new(false)),
             buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
         });
-        let icache_register_result = self.icache.try_register_req(&new_mem_load_req);
         assert!(
-            icache_register_result.is_ok(),
-            "The memory request to I$ should not fail, because the I$ is not shared.",
+            self.icache.try_register_req(&new_mem_load_req).is_ok(),
+            "The memory request to L1-I$ should not fail, because the L1-I$ is not shared resource.",
         );
 
-        // whether the read request to I$ is done in the current cycle
+        // whether the read request to L1-I$ is done in the current cycle
         if new_mem_load_req.get_done() {
             // yes -> get inst and put it into self.id_op
             let load_data: [u8; 4] = new_mem_load_req.get_load_req_ref().buffer.borrow()[0..=3]
@@ -132,13 +151,19 @@ impl FiveStagePipeStage {
             let inst_raw_binary = u32::from_le_bytes(load_data);
             self.id_op = Some(PreDecodeMicroOp {
                 inst: Instruction::raw_binary_to_inst(inst_raw_binary),
-                pc: self.if_pc,
+                pc: new_mem_load_req.get_addr(),
                 opcode: (inst_raw_binary & 0x7f) as u8,
                 ..Default::default()
             });
+            // udpate if_pc
+            if branch_predict_result.direction {
+                self.if_pc = branch_predict_result.addr.unwrap();
+            } else {
+                self.if_pc += 4;
+            }
         } else {
             // no -> stall IF stage and waiting for the request to be completed
-            self.if_is_wating = Some(new_mem_load_req);
+            self.if_is_waiting = (Some(new_mem_load_req), branch_predict_result);
         }
     }
 
@@ -146,18 +171,22 @@ impl FiveStagePipeStage {
     ///
     /// In the ID-stage, it pre-decodes the instruction from IF-stage into PreDecodeMicroOp with necessary information.
     /// IT can help the latter stages to perform specific operations without complex decoding logic.
-    fn pipe_stage_decode(&mut self) {
+    fn pipe_stage_decode(&mut self, additional_stall: bool) {
         // stall current stage if downstream stage are stalled
-        if self.exe_op.is_some() {
+        if self.exe_op.is_some() | self.mem_op.is_some() | self.wb_op.is_some() {
             return;
         }
         // stall if `self.id_op` is not ready (means that ID stage is still waiting for I$)
         if self.id_op.is_none() {
             return;
         }
+        // stall if there is Load-Use Hazard which needs additional stall even with data forwarding
+        if additional_stall {
+            return;
+        }
 
         // perform pre-decoding logic
-        let mut current_op = self.id_op.take().unwrap();
+        let mut current_op = self.id_op.take().unwrap(); // note take() at here
         let inst_ref = &current_op.inst;
 
         // Pre-decode
@@ -303,6 +332,7 @@ impl FiveStagePipeStage {
                 current_op.is_env_call = true;
             }
 
+            // We capture illegal instructions in the ID stage and make the program panic.
             Instruction::Illegal(raw_inst) => panic!("Unknown instruction: {:#08X}", raw_inst),
         }
 
@@ -327,21 +357,35 @@ impl FiveStagePipeStage {
             Instruction::Srl(_) | Instruction::Srli(_) => current_op.alu_op_type = AluOpTypes::Srl,
             // Shift Right Arithmetically
             Instruction::Sra(_) | Instruction::Srai(_) => current_op.alu_op_type = AluOpTypes::Sra,
+            // Bitwise OR
+            Instruction::Or(_) | Instruction::Ori(_) => current_op.alu_op_type = AluOpTypes::Or,
             // Bitwise AND
             Instruction::And(_) | Instruction::Andi(_) => current_op.alu_op_type = AluOpTypes::And,
-            // Mul
-            // Mul Unsigned
+            // Mul (signed, lower half part)
+            Instruction::Mul(_) => current_op.alu_op_type = AluOpTypes::Mul,
+            // Mul (signed, higher half part)
+            Instruction::Mulh(_) => current_op.alu_op_type = AluOpTypes::Mulh,
+            // Mulhu (unsigned, higher hal part)
+            Instruction::Mulhu(_) => current_op.alu_op_type = AluOpTypes::Mulhu,
+            // Mulhsu (signed * unsigned, higher half part)
+            Instruction::Mulhsu(_) => current_op.alu_op_type = AluOpTypes::Mulhsu,
             // Div
+            Instruction::Div(_) => current_op.alu_op_type = AluOpTypes::Div,
             // Div Unsigned
+            Instruction::Divu(_) => current_op.alu_op_type = AluOpTypes::Divu,
             // Modulo
+            Instruction::Rem(_) => current_op.alu_op_type = AluOpTypes::Rem,
             // Modulo Unsigned
-            // @TODO
+            Instruction::Remu(_) => current_op.alu_op_type = AluOpTypes::Remu,
             _ => {}
         }
 
+        // pass uOp to next stage (EXE stage)
+        self.exe_op = Some(current_op);
+
         // **Ps**
         // In hardware implementation, stage 1 and 2 can be implemented in parallel.
-        // In other words, the hardware decoder can have two parallel decoding path.
+        // In other words, the hardware decoder can have two parallel decoding path because they are independent logically.
         // The first performs common decoding logics, and the second performs specific decoding logic for determining ALU OP-Types.
     }
 
@@ -353,7 +397,7 @@ impl FiveStagePipeStage {
             return;
         }
         // stall EXE stage if downstream is stalled
-        if self.mem_op.is_some() {
+        if self.mem_op.is_some() | self.wb_op.is_some() {
             return;
         }
         // stall EXE stage if ID stage did not complete his job in last cycle
@@ -361,30 +405,25 @@ impl FiveStagePipeStage {
             return;
         }
 
-        let exe_op_ref = self.exe_op.as_ref().unwrap();
+        // Assume that RAW data hazards have been solved at here
 
-        // __forwarding detection logics__
-        // In this implementation, it exists two possible forwarding path.
-        // One is MEM-to-EXE path, and the source of newest reg. value is mem_op.alu_out,
-        // and the other is WB-to-EXE path, and the source of the newest reg. value is write-back value in WB stage.
-        // check whether it must forward reg. rs1 value
-        if exe_op_ref.rs1.is_some() && (exe_op_ref.rs1.unwrap().0 != 0) {
-            // load-use hazard -> make it become EXE-WB hazard
-            // for other cases, just forward
-        }
-        // check whether it must forward reg. rs2 value
-        if exe_op_ref.rs2.is_some() && (exe_op_ref.rs2.unwrap().0 != 0) {
-            // load-use hazard -> make it become EXE-WB hazard
-            // for other cases, just forward
-        }
+        let current_op = self.exe_op.take().unwrap();
+        // numerical calculations
 
-        // forwarding detect
+        // resolve control-flow instructions (conditional/unconditional branches)
+        if current_op.is_branch {
+            //
+        }
     }
 
     /// ### Memory Access Pipeline Stage Function
     fn pipe_stage_mem(&mut self) {
         // stall if there is no any job to do
         if self.mem_op.is_none() {
+            return;
+        }
+        // stall if downstream stage is stalled
+        if self.wb_op.is_some() {
             return;
         }
 
@@ -412,10 +451,11 @@ impl FiveStagePipeStage {
             return;
         }
 
+        // handle current instruction in WB stage
         let current_op = self.wb_op.take().unwrap();
         match current_op.wb_sel {
             WriteBackSelect::AluOut if current_op.rd_index != 0 => {
-                self.id_regs[current_op.rd_index as usize] = current_op.alu_result
+                self.id_regs[current_op.rd_index as usize] = current_op.alu_result.unwrap()
             }
             WriteBackSelect::LoadData if current_op.rd_index != 0 => {
                 self.id_regs[current_op.rd_index as usize] = current_op.mem_load_value.expect(
@@ -429,9 +469,10 @@ impl FiveStagePipeStage {
         }
     }
 
-    /// ### Branch Recovering Stage when meeting branch mis-prediction
-    fn pipe_branch_recover(&mut self) {
-        todo!();
+    /// Try to solve RAW hazards before the start of a new cycle by using data forwarding
+    fn pipe_data_forwarding(&mut self) -> bool {
+        // @TODO
+        false
     }
 }
 
@@ -441,11 +482,14 @@ impl Clocked for FiveStagePipeStage {
     /// We should consider the simulation order of pipeline stage carefully.
     /// The main reason is about data hazard and data forwarding.
     fn tick(&mut self) {
+        let stall_load_use_hazard = self.pipe_data_forwarding();
         self.pipe_stage_wb();
         self.pipe_stage_mem();
         self.pipe_stage_exe();
-        self.pipe_stage_decode();
+        self.pipe_stage_decode(stall_load_use_hazard);
         self.pipe_stage_fetch();
-        self.pipe_branch_recover();
+
+        // handle branch recovery for branch miss-prediction
+        // @TODO
     }
 }

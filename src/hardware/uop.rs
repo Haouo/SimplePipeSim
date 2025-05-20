@@ -14,7 +14,9 @@ pub enum AluOpTypes {
     Sub,
     Sra,
     Mul,
-    Mulu,
+    Mulh,
+    Mulhu,
+    Mulhsu,
     Div,
     Divu,
     Rem,
@@ -36,7 +38,7 @@ pub enum AluOpTwoSelect {
     ImmSignExt,
 }
 
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 pub enum WriteBackSelect {
     LoadData,
     PcPlus4,
@@ -80,7 +82,6 @@ pub struct PreDecodeMicroOp {
 
     // branch information
     pub is_branch: bool,     // generated in ID
-    pub branch_taken: bool,  // determined in ID or EXE, depends on whether it's conditional branch
     pub target_address: u32, // calculated in EXE as well
 
     // is environment call
