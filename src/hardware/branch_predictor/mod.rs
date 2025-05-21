@@ -1,18 +1,19 @@
+#[derive(Default)]
 pub struct BranchPredictResult {
     pub direction: bool,
     pub addr: Option<u32>,
 }
 
-pub trait BranchPredictor {
+pub trait BranchPredict {
     fn branch_predict(&mut self, current_pc: u32) -> BranchPredictResult;
     fn mispredict_recovery(&mut self, correct_direction: bool, target_addr: u32);
 }
 
 // Dummp Predictor which always predicts branch not-taken
-pub mod DummyPredictor {
+pub mod dummy {
     use super::*;
     pub struct Predictor;
-    impl BranchPredictor for Predictor {
+    impl BranchPredict for Predictor {
         #[allow(unused)]
         fn branch_predict(&mut self, current_pc: u32) -> BranchPredictResult {
             BranchPredictResult {
@@ -27,3 +28,4 @@ pub mod DummyPredictor {
 
 // other predictor implementations
 pub mod bimodal;
+pub mod two_level_adaptive;

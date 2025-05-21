@@ -1,7 +1,7 @@
 use crate::riscv::encoding::OpcodeMap;
 use crate::riscv::instruction::Instruction;
 
-use super::branch_predictor::{BranchPredictResult, BranchPredictor};
+use super::branch_predictor::{BranchPredict, BranchPredictResult};
 use super::clock::Clocked;
 use super::mem::abstract_mem::*;
 use super::mem::general_cache::replacement_policy::fifo;
@@ -18,7 +18,7 @@ use std::rc::Rc;
 pub struct FiveStagePipeStage {
     // IF-Stage instruction fetch PC
     if_pc: u32,
-    branch_predictor: Box<dyn BranchPredictor>,
+    branch_predictor: Box<dyn BranchPredict>,
 
     // register file (be accessed in ID and WB)
     id_regs: [u32; 32],
@@ -56,7 +56,7 @@ impl FiveStagePipeStage {
     pub fn new(init_pc: u32, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
         FiveStagePipeStage {
             if_pc: init_pc,
-            branch_predictor: Box::new(super::branch_predictor::DummyPredictor::Predictor),
+            branch_predictor: Box::new(super::branch_predictor::dummy::Predictor),
             id_regs: [0; 32],
             id_op: None,
             exe_op: None,
