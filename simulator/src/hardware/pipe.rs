@@ -15,7 +15,7 @@ use std::rc::Rc;
 /// # Public struct `PipeState`
 ///
 /// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor
-pub struct FiveStagePipeStage {
+pub struct PipelineProcessor {
     // IF-Stage instruction fetch PC
     if_pc: u32,
     branch_predictor: Box<dyn BranchPredict>,
@@ -49,12 +49,12 @@ pub struct FiveStagePipeStage {
     dcache: Box<dyn AbstractMemoryInterface>,
 }
 
-impl FiveStagePipeStage {
+impl PipelineProcessor {
     /// The constructor of PipeState struct.
     ///
     /// This function also have the responsibility for initialization the object.
     pub fn new(init_pc: u32, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
-        FiveStagePipeStage {
+        PipelineProcessor {
             if_pc: init_pc,
             branch_predictor: Box::new(super::branch_predictor::dummy::Predictor),
             id_regs: [0; 32],
@@ -121,12 +121,13 @@ impl FiveStagePipeStage {
                 ..Default::default()
             });
             // update current if_pc according to branch prediction result
-            if self.if_is_waiting.1.direction {
-                self.if_pc = self.if_is_waiting.1.addr.unwrap();
+            let branch_predict_result = &self.if_is_waiting.1;
+            if branch_predict_result.direction {
+                self.if_pc = branch_predict_result.addr.unwrap();
             } else {
                 self.if_pc += 4;
             }
-            return;
+            return; // end of this cycle
         }
 
         // handle new instruction fetching operation
@@ -398,15 +399,116 @@ impl FiveStagePipeStage {
             return;
         }
 
-        // Assume that RAW data hazards have been solved at here
+        /* Assume that all possible RAW data hazards have been solved at this point. */
 
-        let current_op = self.exe_op.take().unwrap();
-        // numerical calculations
+        // handle current inst. at EXE stage
+        if let Some(ref mut current_op) = self.exe_op {
+            // numerical calculations
+            let op1: u32 = match current_op.alu_op1_sel {
+                AluOpOneSelect::RegRs1 => current_op.rs1.unwrap().1,
+                AluOpOneSelect::CurrentPc => current_op.pc,
+                AluOpOneSelect::Zero => 0u32,
+            };
+            let op2: u32 = match current_op.alu_op2_sel {
+                AluOpTwoSelect::RegRs2 => current_op.rs2.unwrap().1,
+                AluOpTwoSelect::ImmSignExt => current_op.immediate_signext,
+            };
+            match current_op.alu_op_type {
+                AluOpTypes::Add => current_op.alu_result = op1 + op2,
+                AluOpTypes::Sub => current_op.alu_result = op1 - op2,
+                AluOpTypes::Sll => {}
+                AluOpTypes::Slt => {
+                    current_op.alu_result = if (op1 as i32) < (op2 as i32) { 1 } else { 0 }
+                }
+                AluOpTypes::Sltu => current_op.alu_result = if op1 < op2 { 1 } else { 0 },
+                AluOpTypes::Xor => current_op.alu_result = op1 ^ op2,
+                AluOpTypes::Srl => current_op.alu_result = op1 << (op2 & 0x1f),
+                AluOpTypes::Sra => current_op.alu_result = ((op1 as i32) << (op2 & 0x1f)) as u32,
+                AluOpTypes::Or => current_op.alu_result = op1 | op2,
+                AluOpTypes::And => current_op.alu_result = op1 & op2,
+                AluOpTypes::Mul => {
+                    current_op.alu_result = (((op1 as i32) as i64) * ((op2 as i32) as i64)) as u32
+                }
+                AluOpTypes::Mulh => {
+                    current_op.alu_result =
+                        ((((op1 as i32) as i64) * ((op2 as i32) as i64)) >> 32) as u32
+                }
+                AluOpTypes::Mulhu => {
+                    current_op.alu_result = ((op1 as u64) * (op2 as u64) >> 32) as u32
+                }
+                AluOpTypes::Mulhsu => {
+                    current_op.alu_result = (((op1 as i32) as i64) * (op2 as i64) >> 32) as u32
+                }
+                AluOpTypes::Div => {
+                    current_op.alu_result = if op2 != 0 {
+                        (((op1 as i32) as i64) / ((op1 as i32) as i64)) as u32
+                    } else {
+                        0xffff_ffffu32
+                    }
+                }
+                AluOpTypes::Divu => {
+                    current_op.alu_result = if op2 != 0 {
+                        ((op1 as u64) / (op2 as u64)) as u32
+                    } else {
+                        0xffff_ffffu32
+                    }
+                }
+                AluOpTypes::Rem => {
+                    current_op.alu_result = if op2 != 0 {
+                        ((op1 as i32) % (op2 as i32)) as u32
+                    } else {
+                        op1
+                    }
+                }
+                AluOpTypes::Remu => current_op.alu_result = if op2 != 0 { op1 % op2 } else { op1 },
+            }
 
-        // resolve control-flow instructions (conditional/unconditional branches)
-        if current_op.is_branch {
+            // resolve control-flow instructions (conditional/unconditional branches)
             //
+            // It have to judge whether the last branch prediction result is correct by comparing
+            // current PC and the actual branch result.
+            if current_op.is_branch {
+                let mut correct_target_pc = 0u32;
+                match current_op.inst {
+                    // unconditional branch
+                    Instruction::Jal(_) => {
+                        correct_target_pc = current_op.alu_result;
+                    }
+                    Instruction::Jalr(_) => {
+                        correct_target_pc = current_op.alu_result;
+                    }
+
+                    // conditional branch
+                    Instruction::Beq(_) => {
+                        correct_target_pc = if op1 == op2 {
+                            //
+                        } else {
+                            //
+                        }
+                    }
+                    Instruction::Bne(_) => {}
+                    Instruction::Blt(_) => {}
+                    Instruction::Bge(_) => {}
+                    Instruction::Bltu(_) => {}
+                    Instruction::Bgeu(_) => {}
+
+                    // non-branch inst.
+                    _ => {
+                        unreachable!();
+                    }
+                }
+
+                // check whether the last branch prediction is incorrect
+                if !(current_op.pc != correct_target_pc) {
+                    // need to perform branch recovery
+                    self.branch_recover = true;
+                    self.branch_flushes = 3;
+                    self.branch_destination = current_op.alu_result;
+                }
+            }
         }
+        // clean exe_op
+        self.exe_op = None;
     }
 
     /// ### Memory Access Pipeline Stage Function
@@ -420,21 +522,73 @@ impl FiveStagePipeStage {
             return;
         }
 
-        // handling ongoing load/store instruction
-        if self.mem_is_waiting.is_some() {
-            // check whether the current memory request is ready
-            if !self.mem_is_waiting.as_ref().unwrap().get_done() {
+        // temporal storage for load data
+        let mut load_data: Option<u32> = None;
+
+        // check inflight memory request
+        if let Some(ref inflight_mem_req) = self.mem_is_waiting {
+            // not done
+            if !inflight_mem_req.get_done() {
                 return;
             }
-
-            // if the memory request has been done
-            //
-
-            return;
+            // inflight request is done and it is LOAD inst.
+            if let MemoryReqType::Load(load_req) = inflight_mem_req {
+                let load_data_arr: [u8; 4] = load_req.buffer.borrow()[0..=3]
+                    .try_into()
+                    .expect("The length of load data from L1-D$ should be 4");
+                load_data = Some(u32::from_le_bytes(load_data_arr));
+            }
         }
 
-        // handle new load/store instruction
-        let current_op = self.mem_op.take().unwrap();
+        // issue new request to L1-D$
+        if let Some(ref current_op) = self.mem_op {
+            if self.mem_op.as_ref().unwrap().is_mem && self.mem_is_waiting.is_none() {
+                let mem_addr = current_op.alu_result;
+                let new_mem_req = if current_op.is_store {
+                    let store_data: [u8; 4] = current_op.rs2.unwrap().1.to_le_bytes();
+                    MemoryReqType::Store(MemoryStoreReq {
+                        addr: mem_addr,
+                        len: 4,
+                        store_data: Box::from(store_data),
+                        done: Rc::new(Cell::new(false)),
+                    })
+                } else {
+                    MemoryReqType::Load(MemoryLoadReq {
+                        addr: mem_addr,
+                        len: 4,
+                        done: Rc::new(Cell::new(false)),
+                        buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
+                    })
+                };
+                // register new memory request
+                assert!(self.dcache.try_register_req(&new_mem_req).is_ok(), "Memory request to L1-D$ should not fail, bacause L1-D$ is not shared resource.");
+
+                // check whether cache is hit in the current cycle
+                if !new_mem_req.get_done() {
+                    // cache miss
+                    self.mem_is_waiting = Some(new_mem_req);
+                    return;
+                }
+
+                // hit in current cycle
+                if !current_op.is_store {
+                    // LOAD inst.
+                    let load_data_arr: [u8; 4] = new_mem_req.get_load_req_ref().buffer.borrow()
+                        [0..=3]
+                        .try_into()
+                        .expect("The length of load data from L1-D$ should be 4.");
+                    load_data = Some(u32::from_le_bytes(load_data_arr));
+                }
+                // it does not to do anything for STORE isnt.
+            }
+        }
+
+        // get load data from L1-D$
+        self.mem_op.as_mut().unwrap().mem_load_value =
+            Some(load_data.expect("Load data should not be None."));
+
+        // clean mem_op
+        self.mem_op = None;
     }
 
     /// ### Architectural Register File Write-back Pipeline Stage Function
@@ -535,7 +689,7 @@ impl FiveStagePipeStage {
     }
 }
 
-impl Clocked for FiveStagePipeStage {
+impl Clocked for PipelineProcessor {
     /// ### tick() function to simulate clock-edge trigger
     ///
     /// We should consider the simulation order of pipeline stage carefully.
@@ -549,6 +703,8 @@ impl Clocked for FiveStagePipeStage {
         self.pipe_stage_fetch();
 
         // handle branch recovery for branch miss-prediction
-        // @TODO
+        if self.branch_recover {
+            // @TODO
+        }
     }
 }

@@ -54,7 +54,7 @@ pub struct PreDecodeMicroOp {
     pub alu_op_type: AluOpTypes,     // generated in ID
     pub alu_op1_sel: AluOpOneSelect, // generated in ID
     pub alu_op2_sel: AluOpTwoSelect, // generated in ID
-    // pub alu_result: Option<u32>, // generated in EXE (the pipeline might take many cycles to calculate)
+    pub alu_result: u32, // generated in EXE (the pipeline might take many cycles to calculate)
 
     // register destination information
     // The index of rd is generated in ID,
@@ -62,12 +62,9 @@ pub struct PreDecodeMicroOp {
     pub rd_write_value: Option<u32>, // might be generated in ID, EXE or MEM
 
     // whether it is memory access instruction
-    pub is_mem: bool,                 // generated in ID
-    pub is_store: bool,               // generated in ID
-    pub mem_access_addr: Option<u32>, // calculated in EXE
-    // `mem_value` stores the load value,
-    // or the value need to be stored into memory
-    // pub mem_load_value: Option<u32>, // generated in MEM
+    pub is_mem: bool,                // generated in ID
+    pub is_store: bool,              // generated in ID
+    pub mem_load_value: Option<u32>, // generated in MEM
 
     // branch information
     pub is_branch: bool,     // generated in ID
