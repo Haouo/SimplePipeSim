@@ -1,18 +1,3 @@
-[package]
-name = "SimplePipeSim"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-object = "0.36.7"
-clap = "4.5.35"
-rand = "0.9.1"
-log = "0.4.27"
-colog = "1.3.0"
-libc = "0.2.172"
-
-[build-dependencies]
-cc = "1.2.22"
-
-[features]
-show_log = []
+[workspace]
+members = ["simulator", "test_program"]
+resolver = "2"
