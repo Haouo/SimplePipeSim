@@ -1,4 +1,4 @@
-use crate::riscv::encoding::OpcodeMap;
+use super::branch_predictor::BranchPredictResult;
 use crate::riscv::instruction::Instruction;
 
 #[derive(Default)]
@@ -42,8 +42,9 @@ pub enum AluOpTwoSelect {
 #[derive(Default)]
 pub struct PreDecodeMicroOp {
     // basic info
-    pub inst: Instruction, // generated in IF
-    pub pc: u32,           // generated in IF
+    pub inst: Instruction,              // generated in IF
+    pub pc: u32,                        // generated in IF
+    pub bp_result: BranchPredictResult, // generated in IF
 
     // register sources information
     pub rs1: Option<(u8, u32)>, // might be generated in ID
@@ -51,10 +52,11 @@ pub struct PreDecodeMicroOp {
     pub immediate_signext: u32, // might be generated in ID
 
     // EXE stage output
-    pub alu_op_type: AluOpTypes,     // generated in ID
-    pub alu_op1_sel: AluOpOneSelect, // generated in ID
-    pub alu_op2_sel: AluOpTwoSelect, // generated in ID
+    pub alu_op_type: AluOpTypes,          // generated in ID
+    pub alu_op1_sel: AluOpOneSelect,      // generated in ID
+    pub alu_op2_sel: AluOpTwoSelect,      // generated in ID
     pub alu_result: u32, // generated in EXE (the pipeline might take many cycles to calculate)
+    pub alu_result_as_rd_dst_value: bool, // whether the calculation result of ALU is write-value of rd register
 
     // register destination information
     // The index of rd is generated in ID,
@@ -62,9 +64,8 @@ pub struct PreDecodeMicroOp {
     pub rd_write_value: Option<u32>, // might be generated in ID, EXE or MEM
 
     // whether it is memory access instruction
-    pub is_mem: bool,                // generated in ID
-    pub is_store: bool,              // generated in ID
-    pub mem_load_value: Option<u32>, // generated in MEM
+    pub is_mem: bool,   // generated in ID
+    pub is_store: bool, // generated in ID
 
     // branch information
     pub is_branch: bool,     // generated in ID

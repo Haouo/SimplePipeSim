@@ -17,7 +17,7 @@ use std::rc::Rc;
 /// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor
 pub struct PipelineProcessor {
     // IF-Stage instruction fetch PC
-    if_pc: u32,
+    if_pc: (u32, BranchPredictResult), // composition of PC with its Branch Predict Result
     branch_predictor: Box<dyn BranchPredict>,
 
     // register file (be accessed in ID and WB)
@@ -32,7 +32,7 @@ pub struct PipelineProcessor {
     wb_op: Option<PreDecodeMicroOp>,
 
     // waiting information about memory related stages (ID and MEM)
-    if_is_waiting: (Option<MemoryReqType>, BranchPredictResult), // second variable is the branch prediction result of the IF PC
+    if_is_waiting: Option<MemoryReqType>, // second variable is the branch prediction result of the IF PC
     mem_is_waiting: Option<MemoryReqType>,
 
     // information for branch misprediction
@@ -55,20 +55,14 @@ impl PipelineProcessor {
     /// This function also have the responsibility for initialization the object.
     pub fn new(init_pc: u32, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
         PipelineProcessor {
-            if_pc: init_pc,
+            if_pc: (init_pc, BranchPredictResult::default()),
             branch_predictor: Box::new(super::branch_predictor::dummy::Predictor),
             id_regs: [0; 32],
             id_op: None,
             exe_op: None,
             mem_op: None,
             wb_op: None,
-            if_is_waiting: (
-                None,
-                BranchPredictResult {
-                    direction: false,
-                    addr: None,
-                },
-            ),
+            if_is_waiting: None,
             mem_is_waiting: None,
             branch_recover: false,
             branch_destination: 0,
@@ -101,69 +95,63 @@ impl PipelineProcessor {
             return;
         }
 
-        // handle inflight instruction fetching operation
-        if self.if_is_waiting.0.is_some() {
-            // check whether the inst. fetching memory request is done
-            if !self.if_is_waiting.0.as_ref().unwrap().get_done() {
+        // for caching load data from L1-I$
+        let mut load_data = 0u32;
+
+        // check whether there is inflight memory load request
+        if let Some(ref mem_req_ref) = self.if_is_waiting {
+            if mem_req_ref.get_done() {
                 return;
             }
 
-            // memory load request is done
-            let if_mem_ref = self.if_is_waiting.0.take().unwrap(); // note take() at here
-            let load_data: [u8; 4] = if_mem_ref.get_load_req_ref().buffer.borrow()[0..=3]
+            // inflight request is done
+            let load_data_arr: [u8; 4] = mem_req_ref.get_load_req_ref().buffer.borrow()[0..=3]
                 .try_into()
-                .expect("The length of load data in IF stage should be 4.");
-            let inst_raw_binary = u32::from_le_bytes(load_data);
-            // put Instruction information into id_op and return
-            self.id_op = Some(PreDecodeMicroOp {
-                inst: Instruction::raw_binary_to_inst(inst_raw_binary),
-                pc: if_mem_ref.get_addr(), // record PC of the inst.
-                ..Default::default()
-            });
-            // update current if_pc according to branch prediction result
-            let branch_predict_result = &self.if_is_waiting.1;
-            if branch_predict_result.direction {
-                self.if_pc = branch_predict_result.addr.unwrap();
-            } else {
-                self.if_pc += 4;
-            }
-            return; // end of this cycle
+                .expect("The length of load data from L1-I$ should be 4.");
+            load_data = u32::from_le_bytes(load_data_arr);
         }
 
-        // handle new instruction fetching operation
-        let branch_predict_result = self.branch_predictor.branch_predict(self.if_pc);
-        let new_mem_load_req = MemoryReqType::Load(MemoryLoadReq {
-            addr: self.if_pc, // use IF-stage PC as fetching base address
-            len: 4,           // no compressed inst.
-            done: Rc::new(Cell::new(false)),
-            buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
-        });
-        assert!(
-            self.icache.try_register_req(&new_mem_load_req).is_ok(),
-            "The memory request to L1-I$ should not fail, because the L1-I$ is not shared resource.",
-        );
-
-        // whether the read request to L1-I$ is done in the current cycle
-        if new_mem_load_req.get_done() {
-            // yes -> get inst and put it into self.id_op
-            let load_data: [u8; 4] = new_mem_load_req.get_load_req_ref().buffer.borrow()[0..=3]
-                .try_into()
-                .expect("The length of load data in IF stage should be 4");
-            let inst_raw_binary = u32::from_le_bytes(load_data);
-            self.id_op = Some(PreDecodeMicroOp {
-                inst: Instruction::raw_binary_to_inst(inst_raw_binary),
-                pc: new_mem_load_req.get_addr(),
-                ..Default::default()
+        // prepare for issuing new load request to L1-I$
+        if self.mem_is_waiting.is_none() {
+            let new_load_req = MemoryReqType::Load(MemoryLoadReq {
+                addr: self.if_pc.0,
+                len: 4,
+                done: Rc::new(Cell::new(false)),
+                buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
             });
-            // udpate if_pc
-            if branch_predict_result.direction {
-                self.if_pc = branch_predict_result.addr.unwrap();
-            } else {
-                self.if_pc += 4;
+            assert!(
+                self.icache.try_register_req(&new_load_req).is_ok(),
+                "Memory request to L1-I$ should not fail, because L1-I$ is not shared resource."
+            );
+
+            // need to wait the inflight request
+            if !new_load_req.get_done() {
+                self.if_is_waiting = Some(new_load_req);
+                return;
             }
+            // cache is hit at current cycle
+            let load_data_arr: [u8; 4] = new_load_req.get_load_req_ref().buffer.borrow()[0..=3]
+                .try_into()
+                .expect("The length of load data from L1-I$ should be 4.");
+            load_data = u32::from_le_bytes(load_data_arr);
+        }
+
+        // make branch prediction for next cycle
+        let next_cycle_bp_result = self.branch_predictor.branch_predict(self.if_pc.0);
+        // tranfer raw binary data to Instructrion and make PreDecodeMicroOp
+        self.id_op = Some(PreDecodeMicroOp {
+            pc: self.if_pc.0,
+            inst: Instruction::raw_binary_to_inst(load_data),
+            bp_result: next_cycle_bp_result.clone(),
+            ..Default::default()
+        });
+        // update PC according to branch prediction result
+        if next_cycle_bp_result.direction {
+            // taken
+            self.if_pc = (next_cycle_bp_result.addr.unwrap(), next_cycle_bp_result);
         } else {
-            // no -> stall IF stage and waiting for the request to be completed
-            self.if_is_waiting = (Some(new_mem_load_req), branch_predict_result);
+            // not-taken
+            self.if_pc = (self.if_pc.0 + 4, BranchPredictResult::default());
         }
     }
 
@@ -214,7 +202,8 @@ impl PipelineProcessor {
                 current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
                 current_op.rd_index = Some(inst.rd());
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                current_op.alu_op2_sel = AluOpTwoSelect::RegRs2
+                current_op.alu_op2_sel = AluOpTwoSelect::RegRs2;
+                current_op.alu_result_as_rd_dst_value = true;
             }
 
             // OP-IMM
@@ -232,6 +221,7 @@ impl PipelineProcessor {
                 current_op.rd_index = Some(inst.rd());
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                current_op.alu_result_as_rd_dst_value = true;
             }
 
             // LOAD
@@ -305,6 +295,7 @@ impl PipelineProcessor {
                 current_op.alu_op1_sel = AluOpOneSelect::Zero;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_op_type = AluOpTypes::Add;
+                current_op.alu_result_as_rd_dst_value = true;
             }
 
             // AUIPC
@@ -314,6 +305,7 @@ impl PipelineProcessor {
                 current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_op_type = AluOpTypes::Add;
+                current_op.alu_result_as_rd_dst_value = true;
             }
 
             // FENCE
@@ -462,35 +454,38 @@ impl PipelineProcessor {
                 }
                 AluOpTypes::Remu => current_op.alu_result = if op2 != 0 { op1 % op2 } else { op1 },
             }
+            if current_op.alu_result_as_rd_dst_value {
+                current_op.rd_write_value = Some(current_op.alu_result);
+            }
 
             // resolve control-flow instructions (conditional/unconditional branches)
             //
             // It have to judge whether the last branch prediction result is correct by comparing
             // current PC and the actual branch result.
             if current_op.is_branch {
-                let mut correct_target_pc = 0u32;
+                let mut taken = false;
                 match current_op.inst {
                     // unconditional branch
-                    Instruction::Jal(_) => {
-                        correct_target_pc = current_op.alu_result;
-                    }
-                    Instruction::Jalr(_) => {
-                        correct_target_pc = current_op.alu_result;
-                    }
-
+                    Instruction::Jal(_) | Instruction::Jalr(_) => taken = true,
                     // conditional branch
-                    Instruction::Beq(_) => {
-                        correct_target_pc = if op1 == op2 {
-                            //
+                    Instruction::Beq(_) => taken = if op1 == op2 { true } else { false },
+                    Instruction::Bne(_) => taken = if op1 != op2 { true } else { false },
+                    Instruction::Blt(_) => {
+                        taken = if (op1 as i32) < (op2 as i32) {
+                            true
                         } else {
-                            //
+                            false
                         }
                     }
-                    Instruction::Bne(_) => {}
-                    Instruction::Blt(_) => {}
-                    Instruction::Bge(_) => {}
-                    Instruction::Bltu(_) => {}
-                    Instruction::Bgeu(_) => {}
+                    Instruction::Bge(_) => {
+                        taken = if (op1 as i32) < (op2 as i32) {
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Instruction::Bltu(_) => taken = if op1 < op2 { true } else { false },
+                    Instruction::Bgeu(_) => taken = if op1 >= op2 { true } else { false },
 
                     // non-branch inst.
                     _ => {
@@ -499,11 +494,10 @@ impl PipelineProcessor {
                 }
 
                 // check whether the last branch prediction is incorrect
-                if !(current_op.pc != correct_target_pc) {
-                    // need to perform branch recovery
+                if current_op.bp_result.direction != taken {
                     self.branch_recover = true;
-                    self.branch_flushes = 3;
                     self.branch_destination = current_op.alu_result;
+                    self.branch_flushes = 3;
                 }
             }
         }
@@ -584,7 +578,7 @@ impl PipelineProcessor {
         }
 
         // get load data from L1-D$
-        self.mem_op.as_mut().unwrap().mem_load_value =
+        self.mem_op.as_mut().unwrap().rd_write_value =
             Some(load_data.expect("Load data should not be None."));
 
         // clean mem_op
