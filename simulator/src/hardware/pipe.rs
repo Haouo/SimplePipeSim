@@ -12,12 +12,18 @@ use super::uop::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// # Public struct `PipeState`
+/// A struct for the composition of PC and Branch Prediction Result
+struct InstFetchInfo {
+    pc: u32,
+    bp_result: BranchPredictResult,
+}
+
+/// Public struct `PipelineProcessor`
 ///
-/// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor
+/// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor.
 pub struct PipelineProcessor {
     // IF-Stage instruction fetch PC
-    if_pc: (u32, BranchPredictResult), // composition of PC with its Branch Predict Result
+    if_info: InstFetchInfo, // composition of PC with its Branch Predict Result
     branch_predictor: Box<dyn BranchPredict>,
 
     // register file (be accessed in ID and WB)
@@ -55,7 +61,10 @@ impl PipelineProcessor {
     /// This function also have the responsibility for initialization the object.
     pub fn new(init_pc: u32, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
         PipelineProcessor {
-            if_pc: (init_pc, BranchPredictResult::default()),
+            if_info: InstFetchInfo {
+                pc: init_pc,
+                bp_result: BranchPredictResult::default(),
+            },
             branch_predictor: Box::new(super::branch_predictor::dummy::Predictor),
             id_regs: [0; 32],
             id_op: None,
@@ -114,7 +123,7 @@ impl PipelineProcessor {
         // prepare for issuing new load request to L1-I$
         if self.mem_is_waiting.is_none() {
             let new_load_req = MemoryReqType::Load(MemoryLoadReq {
-                addr: self.if_pc.0,
+                addr: self.if_info.pc,
                 len: 4,
                 done: Rc::new(Cell::new(false)),
                 buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
@@ -137,21 +146,27 @@ impl PipelineProcessor {
         }
 
         // make branch prediction for next cycle
-        let next_cycle_bp_result = self.branch_predictor.branch_predict(self.if_pc.0);
+        let next_cycle_bp_result = self.branch_predictor.branch_predict(self.if_info.pc);
         // tranfer raw binary data to Instructrion and make PreDecodeMicroOp
         self.id_op = Some(PreDecodeMicroOp {
-            pc: self.if_pc.0,
+            pc: self.if_info.pc,
             inst: Instruction::raw_binary_to_inst(load_data),
-            bp_result: next_cycle_bp_result.clone(),
+            bp_result: self.if_info.bp_result,
             ..Default::default()
         });
         // update PC according to branch prediction result
         if next_cycle_bp_result.direction {
             // taken
-            self.if_pc = (next_cycle_bp_result.addr.unwrap(), next_cycle_bp_result);
+            self.if_info = InstFetchInfo {
+                pc: next_cycle_bp_result.addr.unwrap(),
+                bp_result: next_cycle_bp_result,
+            };
         } else {
             // not-taken
-            self.if_pc = (self.if_pc.0 + 4, BranchPredictResult::default());
+            self.if_info = InstFetchInfo {
+                pc: self.if_info.pc + 4,
+                bp_result: BranchPredictResult::default(),
+            };
         }
     }
 
