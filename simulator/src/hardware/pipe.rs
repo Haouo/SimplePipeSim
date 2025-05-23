@@ -12,18 +12,17 @@ use super::uop::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// A struct for the composition of PC and Branch Prediction Result
-struct InstFetchInfo {
-    pc: u32,
-    bp_result: BranchPredictResult,
-}
+/// Additional Stalls for Integer Mul/Div Instructions
+const MUL_STALL: usize = 8;
+const DIV_REM_STALL: usize = 32;
 
 /// Public struct `PipelineProcessor`
 ///
 /// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor.
 pub struct PipelineProcessor {
     // IF-Stage instruction fetch PC
-    if_info: InstFetchInfo, // composition of PC with its Branch Predict Result
+    if_pc: u32, // composition of PC with its Branch Predict Result
+    if_raw_isnt_buffer: Option<u32>,
     branch_predictor: Box<dyn BranchPredict>,
 
     // register file (be accessed in ID and WB)
@@ -43,11 +42,12 @@ pub struct PipelineProcessor {
 
     // information for branch misprediction
     branch_recover: bool,
+    branch_correct_direction: bool,
     branch_destination: u32,
     branch_flushes: usize,
 
     // imitate stall for integer mul/div instructions
-    int_mul_div_stall_countdown: u8,
+    int_mul_div_stall_countdown: Option<usize>,
 
     // L1 Instruction Cache
     icache: Box<dyn AbstractMemoryInterface>,
@@ -61,10 +61,8 @@ impl PipelineProcessor {
     /// This function also have the responsibility for initialization the object.
     pub fn new(init_pc: u32, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
         PipelineProcessor {
-            if_info: InstFetchInfo {
-                pc: init_pc,
-                bp_result: BranchPredictResult::default(),
-            },
+            if_pc: init_pc,
+            if_raw_isnt_buffer: None,
             branch_predictor: Box::new(super::branch_predictor::dummy::Predictor),
             id_regs: [0; 32],
             id_op: None,
@@ -74,9 +72,10 @@ impl PipelineProcessor {
             if_is_waiting: None,
             mem_is_waiting: None,
             branch_recover: false,
+            branch_correct_direction: false,
             branch_destination: 0,
             branch_flushes: 0,
-            int_mul_div_stall_countdown: 0,
+            int_mul_div_stall_countdown: None,
             // I$ configuration: 4096 bytes in total, 4-way associativity, 32 bytes for each block (implies 32 sets)
             icache: Box::new(GeneralCache::<fifo::FifoRP>::new(
                 4096,
@@ -95,35 +94,25 @@ impl PipelineProcessor {
 
     /// ### Instruction Fetch Pipeline Stage Function
     fn pipe_stage_fetch(&mut self) {
-        // stall current stage, because downstream is stalled
-        if self.id_op.is_some()
-            | self.exe_op.is_some()
-            | self.mem_op.is_some()
-            | self.wb_op.is_some()
-        {
-            return;
-        }
-
-        // for caching load data from L1-I$
-        let mut load_data = 0u32;
-
         // check whether there is inflight memory load request
         if let Some(ref mem_req_ref) = self.if_is_waiting {
             if mem_req_ref.get_done() {
                 return;
             }
 
-            // inflight request is done
-            let load_data_arr: [u8; 4] = mem_req_ref.get_load_req_ref().buffer.borrow()[0..=3]
+            // inflight request is done (it should take out if_is_wating and leaves it as None)
+            let take_mem_req = self.if_is_waiting.take().unwrap();
+            let load_data_arr: [u8; 4] = take_mem_req.get_load_req_ref().buffer.borrow()[0..=3]
                 .try_into()
                 .expect("The length of load data from L1-I$ should be 4.");
-            load_data = u32::from_le_bytes(load_data_arr);
+            self.if_raw_isnt_buffer = Some(u32::from_le_bytes(load_data_arr));
         }
 
-        // prepare for issuing new load request to L1-I$
+        // if there is not inflight request to L1-I$, prepare for issuing new load request to L1-I$
+        // (do not consider whether the downstream is stalled as here)
         if self.mem_is_waiting.is_none() {
             let new_load_req = MemoryReqType::Load(MemoryLoadReq {
-                addr: self.if_info.pc,
+                addr: self.if_pc,
                 len: 4,
                 done: Rc::new(Cell::new(false)),
                 buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
@@ -142,32 +131,63 @@ impl PipelineProcessor {
             let load_data_arr: [u8; 4] = new_load_req.get_load_req_ref().buffer.borrow()[0..=3]
                 .try_into()
                 .expect("The length of load data from L1-I$ should be 4.");
-            load_data = u32::from_le_bytes(load_data_arr);
+            self.if_raw_isnt_buffer = Some(u32::from_le_bytes(load_data_arr));
         }
 
-        // make branch prediction for next cycle
-        let next_cycle_bp_result = self.branch_predictor.branch_predict(self.if_info.pc);
-        // tranfer raw binary data to Instructrion and make PreDecodeMicroOp
-        self.id_op = Some(PreDecodeMicroOp {
-            pc: self.if_info.pc,
-            inst: Instruction::raw_binary_to_inst(load_data),
-            bp_result: self.if_info.bp_result,
-            ..Default::default()
-        });
-        // update PC according to branch prediction result
-        if next_cycle_bp_result.direction {
-            // taken
-            self.if_info = InstFetchInfo {
-                pc: next_cycle_bp_result.addr.unwrap(),
-                bp_result: next_cycle_bp_result,
+        let downstream_stalled = self.id_op.is_some()
+            | self.exe_op.is_some()
+            | self.mem_op.is_some()
+            | self.wb_op.is_some();
+        // propagate uOp __only when__ downstream __is not__ stalled
+        if !downstream_stalled {
+            // small pre-decoding logic for checking control-flow inst.
+            let raw_inst = self
+                .if_raw_isnt_buffer
+                .expect("The instruction buffer should not be None at the point!");
+            let opcode: OpcodeMap = ((raw_inst & 0x7f) as u8)
+                .try_into()
+                .or(Result::<OpcodeMap, ()>::Ok(OpcodeMap::Op)) // dummy value for unknown OPCODE
+                .unwrap();
+            let new_inst = Instruction::raw_binary_to_inst(
+                self.if_raw_isnt_buffer
+                    .take()
+                    .expect("Fetced data should not be None!"),
+            );
+
+            // tranfer raw binary data to Instructrion and make PreDecodeMicroOp
+            self.id_op = if let OpcodeMap::Branch | OpcodeMap::Jal | OpcodeMap::Jalr = opcode {
+                // make branch prediction for next cycle __only when__ it is control-flow inst.
+                let next_cycle_bp_result: BranchPredictResult =
+                    self.branch_predictor.branch_predict(self.if_pc);
+
+                // update PC
+                if next_cycle_bp_result.direction {
+                    self.if_pc = next_cycle_bp_result.addr.unwrap();
+                } else {
+                    self.if_pc += 4;
+                }
+
+                // make new uOp to ID
+                Some(PreDecodeMicroOp {
+                    inst: new_inst,
+                    pc: self.if_pc,
+                    is_branch: true,
+                    bp_result: Some(next_cycle_bp_result),
+                    ..Default::default()
+                })
+            } else {
+                // update PC
+                self.if_pc += 4;
+
+                // make new uOp to ID
+                Some(PreDecodeMicroOp {
+                    inst: new_inst,
+                    pc: self.if_pc,
+                    is_branch: false,
+                    ..Default::default()
+                })
             };
-        } else {
-            // not-taken
-            self.if_info = InstFetchInfo {
-                pc: self.if_info.pc + 4,
-                bp_result: BranchPredictResult::default(),
-            };
-        }
+        } // if downstream is stalled while the fetched data is ready, just pass current cycle and caches the fetch data
     }
 
     /// ### Instruction Decode Pipeline Stage Function
@@ -179,7 +199,7 @@ impl PipelineProcessor {
         if self.exe_op.is_some() | self.mem_op.is_some() | self.wb_op.is_some() {
             return;
         }
-        // stall if `self.id_op` is not ready (means that ID stage is still waiting for I$)
+        // stall if `self.id_op` is not ready (means that ID stage is still waiting for IF stage to produce new uOp)
         if self.id_op.is_none() {
             return;
         }
@@ -192,7 +212,8 @@ impl PipelineProcessor {
         let mut current_op = self.id_op.take().unwrap(); // note take() at here
         let inst_ref = &current_op.inst;
 
-        // Pre-decode
+        // Stage 1 pre-decoding
+        // generate most of isnt. info. and read data from register file
         match inst_ref {
             // OP
             Instruction::Add(inst)
@@ -216,9 +237,9 @@ impl PipelineProcessor {
                 current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
                 current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
                 current_op.rd_index = Some(inst.rd());
+                current_op.alu_result_as_rd_dst_value = true;
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
                 current_op.alu_op2_sel = AluOpTwoSelect::RegRs2;
-                current_op.alu_result_as_rd_dst_value = true;
             }
 
             // OP-IMM
@@ -234,6 +255,7 @@ impl PipelineProcessor {
                 current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
                 current_op.immediate_signext = inst.imm_sign_ext();
                 current_op.rd_index = Some(inst.rd());
+                current_op.alu_result_as_rd_dst_value = true;
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_result_as_rd_dst_value = true;
@@ -250,23 +272,23 @@ impl PipelineProcessor {
                 current_op.rd_index = Some(inst.rd());
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.alu_op_type = AluOpTypes::Add;
+                current_op.alu_op_type = AluOpTypes::Add; // (rs1 + imm) as memory access addr.
                 current_op.is_mem = true;
             }
 
             // STORE
             Instruction::Sb(inst) | Instruction::Sh(inst) | Instruction::Sw(inst) => {
                 current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
+                current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize])); // rs2 -> mem[rs1 + imm]
                 current_op.immediate_signext = inst.sign_ext();
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.alu_op_type = AluOpTypes::Add;
+                current_op.alu_op_type = AluOpTypes::Add; // (rs1 + imm) as memory access addr.
                 current_op.is_mem = true;
                 current_op.is_store = true;
             }
 
-            // BRANCH
+            // Conditional BRANCH
             Instruction::Beq(inst)
             | Instruction::Bne(inst)
             | Instruction::Blt(inst)
@@ -286,20 +308,21 @@ impl PipelineProcessor {
             Instruction::Jal(inst) => {
                 current_op.immediate_signext = inst.sign_ext();
                 current_op.rd_index = Some(inst.rd());
+                current_op.rd_write_value = Some(current_op.pc + 4); // jump and "link"
                 current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_op_type = AluOpTypes::Add;
-                current_op.rd_write_value = Some(current_op.pc + 4);
                 current_op.is_branch = true;
             }
             // JALR
             Instruction::Jalr(inst) => {
                 current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                current_op.immediate_signext = inst.imm_sign_ext();
+                current_op.rd_index = Some(inst.rd());
+                current_op.rd_write_value = Some(current_op.pc + 4);
+                current_op.immediate_signext = inst.imm_sign_ext(); // jump and "link"
                 current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
                 current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
                 current_op.alu_op_type = AluOpTypes::Add;
-                current_op.rd_write_value = Some(current_op.pc + 4);
                 current_op.is_branch = true;
             }
 
@@ -337,8 +360,8 @@ impl PipelineProcessor {
             Instruction::Illegal(raw_inst) => panic!("Unknown instruction: {:#08X}", raw_inst),
         }
 
-        // stage 2 pre-decode (fine-grained) for OP and OP-IMM OPCODE types
-        // it decides the ALU Operation types
+        // stage 2 pre-decode for OP and OP-IMM OPCODE types
+        // It works mainly on decideing the ALU Operation types
         match inst_ref {
             // Addition
             Instruction::Add(_) | Instruction::Addi(_) => current_op.alu_op_type = AluOpTypes::Add,
@@ -392,11 +415,6 @@ impl PipelineProcessor {
 
     /// ### Instruction Execute Pipeline Stage Function
     fn pipe_stage_exe(&mut self) {
-        // decrease Mul/Div/Rem countdown counter in need, and stall if the counter is not zero
-        if self.int_mul_div_stall_countdown > 0 {
-            self.int_mul_div_stall_countdown -= 1;
-            return;
-        }
         // stall EXE stage if downstream is stalled
         if self.mem_op.is_some() | self.wb_op.is_some() {
             return;
@@ -405,32 +423,76 @@ impl PipelineProcessor {
         if self.exe_op.is_none() {
             return;
         }
+        // stall when it is handling M-extension inst.
+        if let Some(ref mut cnt) = self.int_mul_div_stall_countdown {
+            if *cnt > 0 {
+                *cnt -= 1;
+            }
+        }
 
         /* Assume that all possible RAW data hazards have been solved at this point. */
 
         // handle current inst. at EXE stage
         if let Some(ref mut current_op) = self.exe_op {
-            // numerical calculations
+            // special actions for M-extension inst.
+            match current_op.inst {
+                Instruction::Mul(_)
+                | Instruction::Mulh(_)
+                | Instruction::Mulhu(_)
+                | Instruction::Mulhsu(_) => {
+                    if self.int_mul_div_stall_countdown.is_none() {
+                        self.int_mul_div_stall_countdown = Some(MUL_STALL);
+                        return;
+                    }
+                }
+                Instruction::Div(_)
+                | Instruction::Divu(_)
+                | Instruction::Rem(_)
+                | Instruction::Remu(_) => {
+                    if self.int_mul_div_stall_countdown.is_none() {
+                        self.int_mul_div_stall_countdown = Some(DIV_REM_STALL);
+                        return;
+                    }
+                }
+                _ => {}
+            }
+
+            // preset ALU's op-1 and op-2
             let op1: u32 = match current_op.alu_op1_sel {
-                AluOpOneSelect::RegRs1 => current_op.rs1.unwrap().1,
+                AluOpOneSelect::RegRs1 => {
+                    current_op
+                        .rs1
+                        .expect("rs1 of current inst. should not be None!")
+                        .1
+                }
                 AluOpOneSelect::CurrentPc => current_op.pc,
                 AluOpOneSelect::Zero => 0u32,
             };
             let op2: u32 = match current_op.alu_op2_sel {
-                AluOpTwoSelect::RegRs2 => current_op.rs2.unwrap().1,
+                AluOpTwoSelect::RegRs2 => {
+                    current_op
+                        .rs2
+                        .expect("rs2 of current inst. should not be None!")
+                        .1
+                }
                 AluOpTwoSelect::ImmSignExt => current_op.immediate_signext,
             };
+            // perform numerical calculations
             match current_op.alu_op_type {
                 AluOpTypes::Add => current_op.alu_result = op1 + op2,
                 AluOpTypes::Sub => current_op.alu_result = op1 - op2,
-                AluOpTypes::Sll => {}
+                AluOpTypes::Sll => current_op.alu_result = op1 << (op2 & 0x1f),
                 AluOpTypes::Slt => {
-                    current_op.alu_result = if (op1 as i32) < (op2 as i32) { 1 } else { 0 }
+                    current_op.alu_result = if (op1 as i32) < (op2 as i32) {
+                        1u32
+                    } else {
+                        0u32
+                    }
                 }
-                AluOpTypes::Sltu => current_op.alu_result = if op1 < op2 { 1 } else { 0 },
+                AluOpTypes::Sltu => current_op.alu_result = if op1 < op2 { 1u32 } else { 0u32 },
                 AluOpTypes::Xor => current_op.alu_result = op1 ^ op2,
-                AluOpTypes::Srl => current_op.alu_result = op1 << (op2 & 0x1f),
-                AluOpTypes::Sra => current_op.alu_result = ((op1 as i32) << (op2 & 0x1f)) as u32,
+                AluOpTypes::Srl => current_op.alu_result = op1 >> (op2 & 0x1f), // logically (fill zeros on the MSB side)
+                AluOpTypes::Sra => current_op.alu_result = ((op1 as i32) >> (op2 & 0x1f)) as u32, // arithmetically (fill sign-bits on the MSB side)
                 AluOpTypes::Or => current_op.alu_result = op1 | op2,
                 AluOpTypes::And => current_op.alu_result = op1 & op2,
                 AluOpTypes::Mul => {
@@ -469,48 +531,52 @@ impl PipelineProcessor {
                 }
                 AluOpTypes::Remu => current_op.alu_result = if op2 != 0 { op1 % op2 } else { op1 },
             }
+
+            // whether current ALU Result is write-back data to destination register rd
             if current_op.alu_result_as_rd_dst_value {
                 current_op.rd_write_value = Some(current_op.alu_result);
             }
 
-            // resolve control-flow instructions (conditional/unconditional branches)
+            // Resolve control-flow instructions (conditional/unconditional branches)
             //
-            // It have to judge whether the last branch prediction result is correct by comparing
-            // current PC and the actual branch result.
+            // It must judge whether the last branch prediction result is correct and
+            // notify the pipeline to perform branch recovery in need.
             if current_op.is_branch {
-                let mut taken = false;
+                #[allow(unused_assignments)]
+                let mut is_taken = false;
                 match current_op.inst {
                     // unconditional branch
-                    Instruction::Jal(_) | Instruction::Jalr(_) => taken = true,
+                    Instruction::Jal(_) | Instruction::Jalr(_) => is_taken = true,
                     // conditional branch
-                    Instruction::Beq(_) => taken = if op1 == op2 { true } else { false },
-                    Instruction::Bne(_) => taken = if op1 != op2 { true } else { false },
+                    Instruction::Beq(_) => is_taken = if op1 == op2 { true } else { false },
+                    Instruction::Bne(_) => is_taken = if op1 != op2 { true } else { false },
                     Instruction::Blt(_) => {
-                        taken = if (op1 as i32) < (op2 as i32) {
+                        is_taken = if (op1 as i32) < (op2 as i32) {
                             true
                         } else {
                             false
                         }
                     }
                     Instruction::Bge(_) => {
-                        taken = if (op1 as i32) < (op2 as i32) {
+                        is_taken = if (op1 as i32) < (op2 as i32) {
                             true
                         } else {
                             false
                         }
                     }
-                    Instruction::Bltu(_) => taken = if op1 < op2 { true } else { false },
-                    Instruction::Bgeu(_) => taken = if op1 >= op2 { true } else { false },
+                    Instruction::Bltu(_) => is_taken = if op1 < op2 { true } else { false },
+                    Instruction::Bgeu(_) => is_taken = if op1 >= op2 { true } else { false },
 
                     // non-branch inst.
                     _ => {
-                        unreachable!();
+                        unreachable!("Non-control-flow instructions should not get to here!");
                     }
                 }
 
                 // check whether the last branch prediction is incorrect
-                if current_op.bp_result.direction != taken {
+                if current_op.bp_result.unwrap().direction != is_taken {
                     self.branch_recover = true;
+                    self.branch_correct_direction = is_taken;
                     self.branch_destination = current_op.alu_result;
                     self.branch_flushes = 3;
                 }
@@ -704,16 +770,46 @@ impl Clocked for PipelineProcessor {
     /// We should consider the simulation order of pipeline stage carefully.
     /// The main reason is about data hazard and data forwarding.
     fn tick(&mut self) {
+        // handle branch recovery for branch miss-prediction
+        if self.branch_recover {
+            // revocer correct if_pc
+            self.if_pc = self.branch_destination;
+
+            // flush pipeline stages
+            if self.branch_flushes >= 2 {
+                self.id_op = None;
+            }
+            if self.branch_flushes >= 3 {
+                self.exe_op = None;
+            }
+            if self.branch_flushes >= 4 {
+                self.mem_op = None;
+            }
+            if self.branch_flushes >= 5 {
+                self.wb_op = None;
+            }
+
+            // update Branch Predictor
+            self.branch_predictor
+                .mispredict_recovery(self.branch_correct_direction, self.branch_destination);
+        }
+
+        // start new simulation cycle
         let stall_load_use_hazard = self.pipe_data_forwarding();
         self.pipe_stage_wb();
         self.pipe_stage_mem();
         self.pipe_stage_exe();
         self.pipe_stage_decode(stall_load_use_hazard);
         self.pipe_stage_fetch();
+    }
+}
 
-        // handle branch recovery for branch miss-prediction
-        if self.branch_recover {
-            // @TODO
-        }
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn hello_world() {
+        todo!();
     }
 }

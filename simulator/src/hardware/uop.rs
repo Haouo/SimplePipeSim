@@ -42,9 +42,8 @@ pub enum AluOpTwoSelect {
 #[derive(Default)]
 pub struct PreDecodeMicroOp {
     // basic info
-    pub inst: Instruction,              // generated in IF
-    pub pc: u32,                        // generated in IF
-    pub bp_result: BranchPredictResult, // generated in IF
+    pub inst: Instruction, // generated in IF
+    pub pc: u32,           // generated in IF
 
     // register sources information
     pub rs1: Option<(u8, u32)>, // might be generated in ID
@@ -68,8 +67,8 @@ pub struct PreDecodeMicroOp {
     pub is_store: bool, // generated in ID
 
     // branch information
-    pub is_branch: bool,     // generated in ID
-    pub target_address: u32, // calculated in EXE as well
+    pub is_branch: bool,                        // generated in IF
+    pub bp_result: Option<BranchPredictResult>, // generated in IF
 
     // is environment call
     pub is_env_call: bool, // generated in ID
