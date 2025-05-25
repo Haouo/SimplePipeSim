@@ -1,0 +1,16 @@
+[package]
+name = "rt"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test_hello"
+path = "bin/hello.rs"
+
+[[bin]]
+name = "test_qsort"
+path = "bin/qsort.rs"
+
+[[bin]]
+name = "test_msort"
+path = "bin/msort.rs"

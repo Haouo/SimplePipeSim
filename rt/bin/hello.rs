@@ -1,10 +1,8 @@
 #![no_std]
 #![no_main]
+use rt;
 
-extern crate alloc;
-
-use test_program;
-
+#[no_mangle]
 fn main() {
     //
 }
