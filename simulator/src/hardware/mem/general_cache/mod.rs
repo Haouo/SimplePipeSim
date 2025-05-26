@@ -130,6 +130,7 @@ impl<RP: ReplacementPolicy> AbstractMemoryInterface for GeneralCache<RP> {
                         self.store_count += 1;
                     }
                 }
+                self.tick(); // **INFO** 1 cycle pre-tick to imitate synchronous access
                 return Ok(());
             }
             _ => {}
@@ -139,6 +140,7 @@ impl<RP: ReplacementPolicy> AbstractMemoryInterface for GeneralCache<RP> {
 }
 
 impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
+    /// tick function which is called in every cycles
     fn tick(&mut self) {
         match self.fsm {
             // * Idle state with pending request
@@ -480,6 +482,11 @@ mod unit_tests {
         for item in read_req.get_load_req_ref().buffer.borrow().iter() {
             assert_eq!(*item, 123);
         }
+    }
+
+    #[test]
+    fn synchronous_access_check() {
+        todo!();
     }
 
     #[test]

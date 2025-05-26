@@ -1,7 +1,7 @@
 #[derive(Default, Clone, Copy)]
 pub struct BranchPredictResult {
     pub direction: bool,
-    pub addr: Option<u32>,
+    pub addr: u32,
 }
 
 pub trait BranchPredict {
@@ -18,7 +18,7 @@ pub mod dummy {
         fn branch_predict(&mut self, current_pc: u32) -> BranchPredictResult {
             BranchPredictResult {
                 direction: false,
-                addr: None,
+                addr: 0u32,
             }
         }
         #[allow(unused)]

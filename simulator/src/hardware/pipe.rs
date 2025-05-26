@@ -12,14 +12,18 @@ use super::uop::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// Additional Stalls for Integer Mul/Div Instructions
+/// Additional stalls for integer MUL instructions
 const MUL_STALL: usize = 8;
+/// Additional stalls for integer DIV/REM instructions
 const DIV_REM_STALL: usize = 32;
 
 /// Public struct `PipelineProcessor`
 ///
 /// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor.
 pub struct PipelineProcessor {
+    // Halt signal
+    halt: bool,
+
     // IF-Stage instruction fetch PC
     if_pc: u32, // composition of PC with its Branch Predict Result
     if_raw_isnt_buffer: Option<u32>,
@@ -61,6 +65,7 @@ impl PipelineProcessor {
     /// This function also have the responsibility for initialization the object.
     pub fn new(init_pc: u32, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
         PipelineProcessor {
+            halt: false,
             if_pc: init_pc,
             if_raw_isnt_buffer: None,
             branch_predictor: Box::new(super::branch_predictor::dummy::Predictor),
@@ -96,7 +101,7 @@ impl PipelineProcessor {
     fn pipe_stage_fetch(&mut self) {
         // check whether there is inflight memory load request
         if let Some(ref mem_req_ref) = self.if_is_waiting {
-            if mem_req_ref.get_done() {
+            if mem_req_ref.get_done() == false {
                 return;
             }
 
@@ -109,7 +114,7 @@ impl PipelineProcessor {
         }
 
         // if there is not inflight request to L1-I$, prepare for issuing new load request to L1-I$
-        // (do not consider whether the downstream is stalled as here)
+        // (do not consider whether the downstream is stalled at here)
         if self.mem_is_waiting.is_none() {
             let new_load_req = MemoryReqType::Load(MemoryLoadReq {
                 addr: self.if_pc,
@@ -123,7 +128,7 @@ impl PipelineProcessor {
             );
 
             // need to wait the inflight request
-            if !new_load_req.get_done() {
+            if new_load_req.get_done() == false {
                 self.if_is_waiting = Some(new_load_req);
                 return;
             }
@@ -139,7 +144,7 @@ impl PipelineProcessor {
             | self.mem_op.is_some()
             | self.wb_op.is_some();
         // propagate uOp __only when__ downstream __is not__ stalled
-        if !downstream_stalled {
+        if downstream_stalled == false {
             // small pre-decoding logic for checking control-flow inst.
             let raw_inst = self
                 .if_raw_isnt_buffer
@@ -156,13 +161,14 @@ impl PipelineProcessor {
 
             // tranfer raw binary data to Instructrion and make PreDecodeMicroOp
             self.id_op = if let OpcodeMap::Branch | OpcodeMap::Jal | OpcodeMap::Jalr = opcode {
-                // make branch prediction for next cycle __only when__ it is control-flow inst.
+                // make branch prediction for next cycle **only when** new_inst is control-flow inst.
                 let next_cycle_bp_result: BranchPredictResult =
                     self.branch_predictor.branch_predict(self.if_pc);
+                let old_pc = self.if_pc;
 
                 // update PC
                 if next_cycle_bp_result.direction {
-                    self.if_pc = next_cycle_bp_result.addr.unwrap();
+                    self.if_pc = next_cycle_bp_result.addr;
                 } else {
                     self.if_pc += 4;
                 }
@@ -170,19 +176,20 @@ impl PipelineProcessor {
                 // make new uOp to ID
                 Some(PreDecodeMicroOp {
                     inst: new_inst,
-                    pc: self.if_pc,
+                    pc: old_pc,
                     is_branch: true,
                     bp_result: Some(next_cycle_bp_result),
                     ..Default::default()
                 })
             } else {
+                let old_pc = self.if_pc;
                 // update PC
                 self.if_pc += 4;
 
                 // make new uOp to ID
                 Some(PreDecodeMicroOp {
                     inst: new_inst,
-                    pc: self.if_pc,
+                    pc: old_pc,
                     is_branch: false,
                     ..Default::default()
                 })
@@ -208,204 +215,215 @@ impl PipelineProcessor {
             return;
         }
 
-        // perform pre-decoding logic
-        let mut current_op = self.id_op.take().unwrap(); // note take() at here
-        let inst_ref = &current_op.inst;
-
         // Stage 1 pre-decoding
         // generate most of isnt. info. and read data from register file
-        match inst_ref {
-            // OP
-            Instruction::Add(inst)
-            | Instruction::Sub(inst)
-            | Instruction::Sll(inst)
-            | Instruction::Slt(inst)
-            | Instruction::Sltu(inst)
-            | Instruction::Xor(inst)
-            | Instruction::Srl(inst)
-            | Instruction::Sra(inst)
-            | Instruction::Or(inst)
-            | Instruction::And(inst)
-            | Instruction::Mul(inst)
-            | Instruction::Mulh(inst)
-            | Instruction::Mulhu(inst)
-            | Instruction::Mulhsu(inst)
-            | Instruction::Div(inst)
-            | Instruction::Divu(inst)
-            | Instruction::Rem(inst)
-            | Instruction::Remu(inst) => {
-                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
-                current_op.rd_index = Some(inst.rd());
-                current_op.alu_result_as_rd_dst_value = true;
-                current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                current_op.alu_op2_sel = AluOpTwoSelect::RegRs2;
+        if let Some(ref mut current_op) = self.id_op {
+            match current_op.inst {
+                // OP
+                Instruction::Add(inst)
+                | Instruction::Sub(inst)
+                | Instruction::Sll(inst)
+                | Instruction::Slt(inst)
+                | Instruction::Sltu(inst)
+                | Instruction::Xor(inst)
+                | Instruction::Srl(inst)
+                | Instruction::Sra(inst)
+                | Instruction::Or(inst)
+                | Instruction::And(inst)
+                | Instruction::Mul(inst)
+                | Instruction::Mulh(inst)
+                | Instruction::Mulhu(inst)
+                | Instruction::Mulhsu(inst)
+                | Instruction::Div(inst)
+                | Instruction::Divu(inst)
+                | Instruction::Rem(inst)
+                | Instruction::Remu(inst) => {
+                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize])); // read regfile
+                    current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize])); // read regfile
+                    current_op.rd_index = Some(inst.rd());
+                    current_op.alu_result_as_rd_dst_value = true;
+                    current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
+                    current_op.alu_op2_sel = AluOpTwoSelect::RegRs2;
+                }
+
+                // OP-IMM
+                Instruction::Addi(inst)
+                | Instruction::Slti(inst)
+                | Instruction::Sltiu(inst)
+                | Instruction::Xori(inst)
+                | Instruction::Ori(inst)
+                | Instruction::Andi(inst)
+                | Instruction::Slli(inst)
+                | Instruction::Srli(inst)
+                | Instruction::Srai(inst) => {
+                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize])); // read regfile
+                    current_op.immediate_signext = inst.imm_sign_ext();
+                    current_op.rd_index = Some(inst.rd());
+                    current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
+                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                    current_op.alu_result_as_rd_dst_value = true;
+                }
+
+                // LOAD
+                Instruction::Lb(inst)
+                | Instruction::Lh(inst)
+                | Instruction::Lw(inst)
+                | Instruction::Lbu(inst)
+                | Instruction::Lhu(inst) => {
+                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize])); // read regfile
+                    current_op.immediate_signext = inst.imm_sign_ext();
+                    current_op.rd_index = Some(inst.rd());
+                    current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
+                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                    current_op.alu_op_type = AluOpTypes::Add; // (rs1 + imm) as memory access addr.
+                    current_op.is_mem = true;
+                }
+
+                // STORE
+                Instruction::Sb(inst) | Instruction::Sh(inst) | Instruction::Sw(inst) => {
+                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
+                    current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize])); // rs2 -> mem[rs1 + imm]
+                    current_op.immediate_signext = inst.sign_ext();
+                    current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
+                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                    current_op.alu_op_type = AluOpTypes::Add; // (rs1 + imm) as memory access addr.
+                    current_op.is_mem = true;
+                    current_op.is_store = true;
+                }
+
+                // Conditional BRANCH
+                Instruction::Beq(inst)
+                | Instruction::Bne(inst)
+                | Instruction::Blt(inst)
+                | Instruction::Bge(inst)
+                | Instruction::Bltu(inst)
+                | Instruction::Bgeu(inst) => {
+                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
+                    current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
+                    current_op.immediate_signext = inst.sign_ext();
+                    current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
+                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                    current_op.alu_op_type = AluOpTypes::Add;
+                    current_op.is_branch = true;
+                }
+
+                // JAL
+                Instruction::Jal(inst) => {
+                    current_op.immediate_signext = inst.sign_ext();
+                    current_op.rd_index = Some(inst.rd());
+                    current_op.rd_write_value = Some(current_op.pc + 4); // jump and "link"
+                    current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
+                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                    current_op.alu_op_type = AluOpTypes::Add;
+                    current_op.is_branch = true;
+                }
+                // JALR
+                Instruction::Jalr(inst) => {
+                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
+                    current_op.rd_index = Some(inst.rd());
+                    current_op.rd_write_value = Some(current_op.pc + 4);
+                    current_op.immediate_signext = inst.imm_sign_ext(); // jump and "link"
+                    current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
+                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                    current_op.alu_op_type = AluOpTypes::Add;
+                    current_op.is_branch = true;
+                }
+
+                // LUI
+                Instruction::Lui(inst) => {
+                    current_op.rd_index = Some(inst.rd());
+                    current_op.immediate_signext = inst.sign_ext();
+                    current_op.alu_op1_sel = AluOpOneSelect::Zero;
+                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                    current_op.alu_op_type = AluOpTypes::Add;
+                    current_op.alu_result_as_rd_dst_value = true;
+                }
+
+                // AUIPC
+                Instruction::Auipc(inst) => {
+                    current_op.rd_index = Some(inst.rd());
+                    current_op.immediate_signext = inst.sign_ext();
+                    current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
+                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
+                    current_op.alu_op_type = AluOpTypes::Add;
+                    current_op.alu_result_as_rd_dst_value = true;
+                }
+
+                // FENCE
+                Instruction::Fence(_inst) => {
+                    todo!();
+                }
+
+                // SYSTEM
+                Instruction::Ecall(_inst) => {
+                    current_op.is_env_call = true;
+                }
+
+                // We capture illegal instructions in the ID stage and make the program panic.
+                Instruction::Illegal(raw_inst) => panic!("Unknown instruction: {:#08X}", raw_inst),
             }
 
-            // OP-IMM
-            Instruction::Addi(inst)
-            | Instruction::Slti(inst)
-            | Instruction::Sltiu(inst)
-            | Instruction::Xori(inst)
-            | Instruction::Ori(inst)
-            | Instruction::Andi(inst)
-            | Instruction::Slli(inst)
-            | Instruction::Srli(inst)
-            | Instruction::Srai(inst) => {
-                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                current_op.immediate_signext = inst.imm_sign_ext();
-                current_op.rd_index = Some(inst.rd());
-                current_op.alu_result_as_rd_dst_value = true;
-                current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.alu_result_as_rd_dst_value = true;
+            // stage 2 pre-decode for OP and OP-IMM OPCODE types
+            // It works mainly on decideing the ALU Operation types
+            match current_op.inst {
+                // Addition
+                Instruction::Add(_) | Instruction::Addi(_) => {
+                    current_op.alu_op_type = AluOpTypes::Add
+                }
+                // Subtraction
+                Instruction::Sub(_) => current_op.alu_op_type = AluOpTypes::Sub,
+                // Shift Left Logically
+                Instruction::Sll(_) | Instruction::Slli(_) => {
+                    current_op.alu_op_type = AluOpTypes::Sll
+                }
+                // Set on Less-than
+                Instruction::Slt(_) | Instruction::Slti(_) => {
+                    current_op.alu_op_type = AluOpTypes::Slt
+                }
+                // Set on Less-than Unsigned
+                Instruction::Sltu(_) | Instruction::Sltiu(_) => {
+                    current_op.alu_op_type = AluOpTypes::Sltu
+                }
+                // Bitwise XOR
+                Instruction::Xor(_) | Instruction::Xori(_) => {
+                    current_op.alu_op_type = AluOpTypes::Xor
+                }
+                // Shift Right Logically
+                Instruction::Srl(_) | Instruction::Srli(_) => {
+                    current_op.alu_op_type = AluOpTypes::Srl
+                }
+                // Shift Right Arithmetically
+                Instruction::Sra(_) | Instruction::Srai(_) => {
+                    current_op.alu_op_type = AluOpTypes::Sra
+                }
+                // Bitwise OR
+                Instruction::Or(_) | Instruction::Ori(_) => current_op.alu_op_type = AluOpTypes::Or,
+                // Bitwise AND
+                Instruction::And(_) | Instruction::Andi(_) => {
+                    current_op.alu_op_type = AluOpTypes::And
+                }
+                // Mul (signed, lower half part)
+                Instruction::Mul(_) => current_op.alu_op_type = AluOpTypes::Mul,
+                // Mul (signed, higher half part)
+                Instruction::Mulh(_) => current_op.alu_op_type = AluOpTypes::Mulh,
+                // Mulhu (unsigned, higher hal part)
+                Instruction::Mulhu(_) => current_op.alu_op_type = AluOpTypes::Mulhu,
+                // Mulhsu (signed * unsigned, higher half part)
+                Instruction::Mulhsu(_) => current_op.alu_op_type = AluOpTypes::Mulhsu,
+                // Div
+                Instruction::Div(_) => current_op.alu_op_type = AluOpTypes::Div,
+                // Div Unsigned
+                Instruction::Divu(_) => current_op.alu_op_type = AluOpTypes::Divu,
+                // Modulo
+                Instruction::Rem(_) => current_op.alu_op_type = AluOpTypes::Rem,
+                // Modulo Unsigned
+                Instruction::Remu(_) => current_op.alu_op_type = AluOpTypes::Remu,
+                _ => {}
             }
-
-            // LOAD
-            Instruction::Lb(inst)
-            | Instruction::Lh(inst)
-            | Instruction::Lw(inst)
-            | Instruction::Lbu(inst)
-            | Instruction::Lhu(inst) => {
-                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                current_op.immediate_signext = inst.imm_sign_ext();
-                current_op.rd_index = Some(inst.rd());
-                current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.alu_op_type = AluOpTypes::Add; // (rs1 + imm) as memory access addr.
-                current_op.is_mem = true;
-            }
-
-            // STORE
-            Instruction::Sb(inst) | Instruction::Sh(inst) | Instruction::Sw(inst) => {
-                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize])); // rs2 -> mem[rs1 + imm]
-                current_op.immediate_signext = inst.sign_ext();
-                current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.alu_op_type = AluOpTypes::Add; // (rs1 + imm) as memory access addr.
-                current_op.is_mem = true;
-                current_op.is_store = true;
-            }
-
-            // Conditional BRANCH
-            Instruction::Beq(inst)
-            | Instruction::Bne(inst)
-            | Instruction::Blt(inst)
-            | Instruction::Bge(inst)
-            | Instruction::Bltu(inst)
-            | Instruction::Bgeu(inst) => {
-                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
-                current_op.immediate_signext = inst.sign_ext();
-                current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
-                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.alu_op_type = AluOpTypes::Add;
-                current_op.is_branch = true;
-            }
-
-            // JAL
-            Instruction::Jal(inst) => {
-                current_op.immediate_signext = inst.sign_ext();
-                current_op.rd_index = Some(inst.rd());
-                current_op.rd_write_value = Some(current_op.pc + 4); // jump and "link"
-                current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
-                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.alu_op_type = AluOpTypes::Add;
-                current_op.is_branch = true;
-            }
-            // JALR
-            Instruction::Jalr(inst) => {
-                current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                current_op.rd_index = Some(inst.rd());
-                current_op.rd_write_value = Some(current_op.pc + 4);
-                current_op.immediate_signext = inst.imm_sign_ext(); // jump and "link"
-                current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.alu_op_type = AluOpTypes::Add;
-                current_op.is_branch = true;
-            }
-
-            // LUI
-            Instruction::Lui(inst) => {
-                current_op.rd_index = Some(inst.rd());
-                current_op.immediate_signext = inst.sign_ext();
-                current_op.alu_op1_sel = AluOpOneSelect::Zero;
-                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.alu_op_type = AluOpTypes::Add;
-                current_op.alu_result_as_rd_dst_value = true;
-            }
-
-            // AUIPC
-            Instruction::Auipc(inst) => {
-                current_op.rd_index = Some(inst.rd());
-                current_op.immediate_signext = inst.sign_ext();
-                current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
-                current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                current_op.alu_op_type = AluOpTypes::Add;
-                current_op.alu_result_as_rd_dst_value = true;
-            }
-
-            // FENCE
-            Instruction::Fence(inst) => {
-                todo!();
-            }
-
-            // SYSTEM
-            Instruction::Ecall(inst) => {
-                current_op.is_env_call = true;
-            }
-
-            // We capture illegal instructions in the ID stage and make the program panic.
-            Instruction::Illegal(raw_inst) => panic!("Unknown instruction: {:#08X}", raw_inst),
         }
 
-        // stage 2 pre-decode for OP and OP-IMM OPCODE types
-        // It works mainly on decideing the ALU Operation types
-        match inst_ref {
-            // Addition
-            Instruction::Add(_) | Instruction::Addi(_) => current_op.alu_op_type = AluOpTypes::Add,
-            // Subtraction
-            Instruction::Sub(_) => current_op.alu_op_type = AluOpTypes::Sub,
-            // Shift Left Logically
-            Instruction::Sll(_) | Instruction::Slli(_) => current_op.alu_op_type = AluOpTypes::Sll,
-            // Set on Less-than
-            Instruction::Slt(_) | Instruction::Slti(_) => current_op.alu_op_type = AluOpTypes::Slt,
-            // Set on Less-than Unsigned
-            Instruction::Sltu(_) | Instruction::Sltiu(_) => {
-                current_op.alu_op_type = AluOpTypes::Sltu
-            }
-            // Bitwise XOR
-            Instruction::Xor(_) | Instruction::Xori(_) => current_op.alu_op_type = AluOpTypes::Xor,
-            // Shift Right Logically
-            Instruction::Srl(_) | Instruction::Srli(_) => current_op.alu_op_type = AluOpTypes::Srl,
-            // Shift Right Arithmetically
-            Instruction::Sra(_) | Instruction::Srai(_) => current_op.alu_op_type = AluOpTypes::Sra,
-            // Bitwise OR
-            Instruction::Or(_) | Instruction::Ori(_) => current_op.alu_op_type = AluOpTypes::Or,
-            // Bitwise AND
-            Instruction::And(_) | Instruction::Andi(_) => current_op.alu_op_type = AluOpTypes::And,
-            // Mul (signed, lower half part)
-            Instruction::Mul(_) => current_op.alu_op_type = AluOpTypes::Mul,
-            // Mul (signed, higher half part)
-            Instruction::Mulh(_) => current_op.alu_op_type = AluOpTypes::Mulh,
-            // Mulhu (unsigned, higher hal part)
-            Instruction::Mulhu(_) => current_op.alu_op_type = AluOpTypes::Mulhu,
-            // Mulhsu (signed * unsigned, higher half part)
-            Instruction::Mulhsu(_) => current_op.alu_op_type = AluOpTypes::Mulhsu,
-            // Div
-            Instruction::Div(_) => current_op.alu_op_type = AluOpTypes::Div,
-            // Div Unsigned
-            Instruction::Divu(_) => current_op.alu_op_type = AluOpTypes::Divu,
-            // Modulo
-            Instruction::Rem(_) => current_op.alu_op_type = AluOpTypes::Rem,
-            // Modulo Unsigned
-            Instruction::Remu(_) => current_op.alu_op_type = AluOpTypes::Remu,
-            _ => {}
-        }
-
-        // pass uOp to next stage (EXE stage)
-        self.exe_op = Some(current_op);
+        // transfer id_op to exe_op
+        self.exe_op = self.id_op.take();
 
         // **Ps**
         // In hardware implementation, stage 1 and 2 can be implemented in parallel.
@@ -415,6 +433,13 @@ impl PipelineProcessor {
 
     /// ### Instruction Execute Pipeline Stage Function
     fn pipe_stage_exe(&mut self) {
+        // decrease M-ext. stall counter even if the downstream is stalled
+        if let Some(ref mut cnt) = self.int_mul_div_stall_countdown {
+            if *cnt > 0 {
+                *cnt -= 1;
+            }
+        }
+
         // stall EXE stage if downstream is stalled
         if self.mem_op.is_some() | self.wb_op.is_some() {
             return;
@@ -422,12 +447,6 @@ impl PipelineProcessor {
         // stall EXE stage if ID stage did not complete his job in last cycle
         if self.exe_op.is_none() {
             return;
-        }
-        // stall when it is handling M-extension inst.
-        if let Some(ref mut cnt) = self.int_mul_div_stall_countdown {
-            if *cnt > 0 {
-                *cnt -= 1;
-            }
         }
 
         /* Assume that all possible RAW data hazards have been solved at this point. */
@@ -574,7 +593,19 @@ impl PipelineProcessor {
                 }
 
                 // check whether the last branch prediction is incorrect
-                if current_op.bp_result.unwrap().direction != is_taken {
+                // There are two possible incorrec results
+                // 1. Predicted direction is wrong
+                // 2. Predicted direction is matched (both taken) while the predicted target PC is wrong
+                let need_recover = if current_op.bp_result.unwrap().direction != is_taken {
+                    true // scenario 1
+                } else {
+                    if is_taken && current_op.bp_result.unwrap().addr != current_op.alu_result {
+                        true // scenario 2
+                    } else {
+                        false
+                    }
+                };
+                if need_recover {
                     self.branch_recover = true;
                     self.branch_correct_direction = is_taken;
                     self.branch_destination = current_op.alu_result;
@@ -582,8 +613,9 @@ impl PipelineProcessor {
                 }
             }
         }
-        // clean exe_op
-        self.exe_op = None;
+
+        // transfer exe_op to mem_op
+        self.mem_op = self.exe_op.take();
     }
 
     /// ### Memory Access Pipeline Stage Function
@@ -602,8 +634,8 @@ impl PipelineProcessor {
 
         // check inflight memory request
         if let Some(ref inflight_mem_req) = self.mem_is_waiting {
-            // not done
-            if !inflight_mem_req.get_done() {
+            // not ready
+            if inflight_mem_req.get_done() == false {
                 return;
             }
             // inflight request is done and it is LOAD inst.
@@ -617,10 +649,14 @@ impl PipelineProcessor {
 
         // issue new request to L1-D$
         if let Some(ref current_op) = self.mem_op {
-            if self.mem_op.as_ref().unwrap().is_mem && self.mem_is_waiting.is_none() {
+            if self.mem_op.as_ref().unwrap().is_mem {
                 let mem_addr = current_op.alu_result;
                 let new_mem_req = if current_op.is_store {
-                    let store_data: [u8; 4] = current_op.rs2.unwrap().1.to_le_bytes();
+                    let store_data: [u8; 4] = current_op
+                        .rs2
+                        .expect("STORE inst. should have rs2 register value!")
+                        .1
+                        .to_le_bytes();
                     MemoryReqType::Store(MemoryStoreReq {
                         addr: mem_addr,
                         len: 4,
@@ -639,14 +675,14 @@ impl PipelineProcessor {
                 assert!(self.dcache.try_register_req(&new_mem_req).is_ok(), "Memory request to L1-D$ should not fail, bacause L1-D$ is not shared resource.");
 
                 // check whether cache is hit in the current cycle
-                if !new_mem_req.get_done() {
+                if new_mem_req.get_done() == false {
                     // cache miss
                     self.mem_is_waiting = Some(new_mem_req);
                     return;
                 }
 
                 // hit in current cycle
-                if !current_op.is_store {
+                if current_op.is_store == false {
                     // LOAD inst.
                     let load_data_arr: [u8; 4] = new_mem_req.get_load_req_ref().buffer.borrow()
                         [0..=3]
@@ -662,8 +698,8 @@ impl PipelineProcessor {
         self.mem_op.as_mut().unwrap().rd_write_value =
             Some(load_data.expect("Load data should not be None."));
 
-        // clean mem_op
-        self.mem_op = None;
+        // transfer mem_op to wb_op
+        self.wb_op = self.mem_op.take();
     }
 
     /// ### Architectural Register File Write-back Pipeline Stage Function
@@ -673,10 +709,22 @@ impl PipelineProcessor {
             return;
         }
 
-        // handle current instruction in WB stage
-        let current_op = self.wb_op.take().unwrap();
-        if current_op.rd_index.is_none() {
+        // handle SYSTEM inst. (e.g. ECALL)
+        if let Instruction::Ecall(_) = self.wb_op.as_ref().unwrap().inst {
+            let reg_a0 = self.id_regs[10];
+            let reg_a1 = self.id_regs[11];
+            if reg_a0 == 0 {
+                self.halt = true; // ends the simulation
+            } else if reg_a0 == 1 {
+                print!("{}", char::from_u32(reg_a1 & 0xff).unwrap()); // print a character which is stored in $a1
+            }
             return;
+        }
+
+        // handle current instruction in WB stage
+        let current_op = self.wb_op.take().unwrap(); // take() consumes wb_op
+        if current_op.rd_index.is_none() {
+            return; // no write back
         }
         self.id_regs[current_op.rd_index.unwrap() as usize] = current_op.rd_write_value.expect(
             "The write value into $rd register should not be None when rd_index is not None. It makes no sense.",
@@ -685,42 +733,45 @@ impl PipelineProcessor {
 
     /// Try to solve RAW hazards before the start of a new cycle by using data forwarding
     fn pipe_data_forwarding(&mut self) -> bool {
-        let exe_op_mut_ref = self.exe_op.as_mut().unwrap();
-        // Check scenario 1: WB -> EXE Forwarding Path
-        if self
-            .wb_op
-            .as_ref()
-            .is_some_and(|x| x.rd_index.is_some_and(|x| x != 0))
-        {
-            let wb_rd_index = self.wb_op.as_ref().unwrap().rd_index.unwrap();
-            if exe_op_mut_ref.rs1.is_some_and(|x| x.0 == wb_rd_index) {
-                exe_op_mut_ref.rs1 = Some((
-                    exe_op_mut_ref.rs1.unwrap().0,
-                    self.wb_op.as_ref().unwrap().rd_write_value.unwrap(),
-                ));
+        // Check scenario 1: WB -> EXE Forwarding Path (lower priority)
+        if let (Some(exe_op), Some(wb_op)) = (&mut self.exe_op, &self.wb_op) {
+            // check exe_op.rs1 <---> wb_op.rd
+            if let (Some(exe_rs1), Some(wb_rd_idx), Some(wb_rd_write_value)) =
+                (&mut exe_op.rs1, wb_op.rd_index, wb_op.rd_write_value)
+            {
+                if (exe_rs1.0 != 0) && (exe_rs1.0 == wb_rd_idx) {
+                    exe_rs1.1 = wb_rd_write_value;
+                }
             }
-            if exe_op_mut_ref.rs2.is_some_and(|x| x.0 == wb_rd_index) {
-                exe_op_mut_ref.rs2 = Some((
-                    exe_op_mut_ref.rs2.unwrap().0,
-                    self.wb_op.as_ref().unwrap().rd_write_value.unwrap(),
-                ));
+            // check exe_op.rs2 <---> wb_op.rd
+            if let (Some(exe_rs2), Some(wb_rd_idx), Some(wb_rd_write_value)) =
+                (&mut exe_op.rs2, wb_op.rd_index, wb_op.rd_write_value)
+            {
+                if (exe_rs2.0 != 0) && (exe_rs2.0 == wb_rd_idx) {
+                    exe_rs2.1 = wb_rd_write_value;
+                }
             }
         }
 
-        // Check scenario 2: MEM -> EXE Forwarding Path
+        // Check scenario 2: MEM -> EXE Forwarding Path (higher proiority)
         // it might override the forwarding data of scenario 1
         // because the latter instruction (in MEM stage) has newest data
-        if self
-            .mem_op
-            .as_ref()
-            .is_some_and(|x| x.rd_index.is_some_and(|x| x != 0))
-        {
-            let mem_rd_index = self.mem_op.as_ref().unwrap().rd_index.unwrap();
-            if exe_op_mut_ref.rs1.unwrap().0 == mem_rd_index {
-                //
+        if let (Some(exe_op), Some(mem_op)) = (&mut self.exe_op, &self.mem_op) {
+            // check exe_op.rs1 <---> mem_op.rd
+            if let (Some(exe_rs1), Some(mem_rd_idx), Some(mem_rd_write_value)) =
+                (&mut exe_op.rs1, mem_op.rd_index, mem_op.rd_write_value)
+            {
+                if (exe_rs1.0 != 0) && (exe_rs1.0 == mem_rd_idx) {
+                    exe_rs1.1 = mem_rd_write_value;
+                }
             }
-            if exe_op_mut_ref.rs2.unwrap().0 == mem_rd_index {
-                //
+            // check exe_op.rs2 <---> mem_op.rd
+            if let (Some(exe_rs2), Some(mem_rd_idx), Some(mem_rd_write_value)) =
+                (&mut exe_op.rs2, mem_op.rd_index, mem_op.rd_write_value)
+            {
+                if (exe_rs2.0 != 0) && (exe_rs2.0 == mem_rd_idx) {
+                    exe_rs2.1 = mem_rd_write_value;
+                }
             }
         }
 

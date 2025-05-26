@@ -1,16 +1,16 @@
 [package]
-name = "rt"
+name = "runtime"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "test_hello"
+name = "hello"
 path = "bin/hello.rs"
 
 [[bin]]
-name = "test_qsort"
+name = "qsort"
 path = "bin/qsort.rs"
 
 [[bin]]
-name = "test_msort"
+name = "msort"
 path = "bin/msort.rs"

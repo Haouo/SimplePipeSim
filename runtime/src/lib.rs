@@ -4,28 +4,11 @@ extern crate alloc;
 
 use core::alloc::GlobalAlloc;
 use core::arch::asm;
+use core::cell::UnsafeCell;
+use core::fmt::Write;
 use core::panic::PanicInfo;
 
 use basic_io::syscall_1;
-
-// declare the sizes of stack and heap for linker script
-extern "C" {
-    static STACK_SIZE: usize;
-    static HEAP_SIZE: usize;
-}
-
-/// A custom and simple heap memory allocator
-struct SimpleAllocator;
-#[global_allocator]
-static ALLOCATOR: SimpleAllocator = SimpleAllocator {};
-unsafe impl GlobalAlloc for SimpleAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        todo!();
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-        todo!();
-    }
-}
 
 fn terminate() -> ! {
     // cleanup
@@ -59,7 +42,9 @@ pub unsafe extern "C" fn _start() -> ! {
     }
 
     // initialization of Heap allocator
-    // @TODO
+    unsafe {
+        allocator::ALLOCATOR.init();
+    }
 
     extern "Rust" {
         fn main();
@@ -70,10 +55,11 @@ pub unsafe extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
-fn panic(_panic: &PanicInfo<'_>) -> ! {
-    // @TODO: print some info
+fn panic(info: &PanicInfo<'_>) -> ! {
+    writeln!(basic_io::Stdout, "Panicked!");
     terminate();
 }
 
 // sub modules
+pub mod allocator;
 pub mod basic_io;

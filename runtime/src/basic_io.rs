@@ -1,5 +1,6 @@
 use core::arch::asm;
-use core::ptr::{read_volatile, write_volatile};
+use core::fmt::Write;
+use core::ptr::write_volatile;
 
 /// only for internal function call
 #[inline(always)]
@@ -20,9 +21,20 @@ pub fn syscall_2(reg_a0: u32, reg_a1: u32) {
 }
 
 #[inline(always)]
-pub fn platform_outb(addr: u32, single_char: i8) {
+fn platform_outb(single_char: char) {
     // it is mapped to sw instruction in RISC-V
     unsafe {
-        write_volatile(addr as *mut i8, single_char);
+        write_volatile(0x1000 as *mut char, single_char);
+    }
+}
+
+/// Unit struct for implementing text display
+pub struct Stdout;
+impl Write for Stdout {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for c in s.chars() {
+            platform_outb(c);
+        }
+        Ok(())
     }
 }
