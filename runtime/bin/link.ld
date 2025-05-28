@@ -3,8 +3,7 @@ ENTRY(_start)
 
 MEMORY
 {
-    FLASH: ORIGIN = 0x00000000, LENGTH = 64K,
-    RAM: ORIGIN = 0x00010000, LENGTH = 64K
+    RAM: ORIGIN = 0x00000000, LENGTH = 128K
 }
 
 SECTIONS
@@ -14,13 +13,13 @@ SECTIONS
         *(.text._start)
         *(.text)
         *(.text.*)
-    } > FLASH
+    } > RAM
 
     .rodata : ALIGN(4)
     {
         *(.rodata)
         *(.rodata.*)
-    } > FLASH
+    } > RAM
 
     .data : AT(ADDR(.rodata) + SIZEOF(.rodata)), ALIGN(4)
     {
