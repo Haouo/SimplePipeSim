@@ -3,14 +3,14 @@ ENTRY(_start)
 
 MEMORY
 {
-    RAM: ORIGIN = 0x00000000, LENGTH = 128K
+    RAM: ORIGIN = 0x00000000, LENGTH = 128K /* use bit-width of 18-bit as memory address */
 }
 
 SECTIONS
 {
     .text : ALIGN(4)
     {
-        *(.text._start)
+        *(.text._start) /* make sure that _start must be at addr. zero */
         *(.text)
         *(.text.*)
     } > RAM
@@ -37,8 +37,8 @@ SECTIONS
         *(.bss)
         *(.bss.*)
         _ebss = .;
-        PROVIDE(sbss = _sbss);
-        PROVIDE(ebss = _ebss);
+        PROVIDE(bss_start = _sbss);
+        PROVIDE(bss_end = _ebss);
     } > RAM
 
     .heap (NOLOAD) :

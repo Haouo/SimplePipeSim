@@ -8,9 +8,5 @@ name = "hello"
 path = "bin/hello.rs"
 
 [[bin]]
-name = "qsort"
-path = "bin/qsort.rs"
-
-[[bin]]
-name = "msort"
-path = "bin/msort.rs"
+name = "print_numbers"
+path = "bin/print_nums.rs"

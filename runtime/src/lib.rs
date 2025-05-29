@@ -2,15 +2,13 @@
 
 extern crate alloc;
 
-use core::alloc::GlobalAlloc;
 use core::arch::asm;
-use core::cell::UnsafeCell;
 use core::fmt::Write;
 use core::panic::PanicInfo;
 
 use basic_io::syscall_1;
 
-fn terminate() -> ! {
+pub fn terminate() -> ! {
     // cleanup
     // @TODO
 
@@ -42,9 +40,7 @@ pub unsafe extern "C" fn _start() -> ! {
     }
 
     // initialization of Heap allocator
-    unsafe {
-        allocator::ALLOCATOR.init();
-    }
+    allocator::ALLOCATOR.init();
 
     extern "Rust" {
         fn main();

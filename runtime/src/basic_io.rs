@@ -1,6 +1,5 @@
 use core::arch::asm;
 use core::fmt::Write;
-use core::ptr::write_volatile;
 
 /// only for internal function call
 #[inline(always)]
@@ -22,10 +21,7 @@ pub fn syscall_2(reg_a0: u32, reg_a1: u32) {
 
 #[inline(always)]
 fn platform_outb(single_char: char) {
-    // it is mapped to sw instruction in RISC-V
-    unsafe {
-        write_volatile(0x1000 as *mut char, single_char);
-    }
+    syscall_2(1, single_char as u32);
 }
 
 /// Unit struct for implementing text display
