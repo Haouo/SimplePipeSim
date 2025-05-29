@@ -3,7 +3,7 @@ ENTRY(_start)
 
 MEMORY
 {
-    RAM: ORIGIN = 0x00000000, LENGTH = 128K /* use bit-width of 18-bit as memory address */
+    RAM : ORIGIN = 0x00000000, LENGTH = 128K /* use bit-width of 18-bit as memory address */
 }
 
 SECTIONS
@@ -21,7 +21,7 @@ SECTIONS
         *(.rodata.*)
     } > RAM
 
-    .data : AT(ADDR(.rodata) + SIZEOF(.rodata)), ALIGN(4)
+    .data : AT(ADDR(.rodata) + SIZEOF(.rodata)) ALIGN(4)
     {
         _sidata = LOADADDR(.data);
         _sdata = .;
@@ -44,7 +44,7 @@ SECTIONS
     .heap (NOLOAD) :
     {
         _sheap = .;
-        . += HEAP_SIZE;
+        . += ABSOLUTE(HEAP_SIZE);
         _eheap = .;
         PROVIDE(heap_start = _sheap);
         PROVIDE(heap_end = _eheap);
@@ -53,8 +53,15 @@ SECTIONS
     .stack (NOLOAD) :
     {
         _estack = .;
-        . += STACK_SIZE;
+        . += ABSOLUTE(STACK_SIZE);
         _sstack = .;
         PROVIDE(stack_top = _sstack);
     } > RAM
+
+    /DISCARD/ :
+    {
+        *(.eh_frame)
+        *(.comment)
+        *(.debug*)
+    }
 }

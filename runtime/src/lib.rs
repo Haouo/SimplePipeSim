@@ -8,9 +8,16 @@ use core::panic::PanicInfo;
 
 use basic_io::syscall_1;
 
+// define the sizes of heap and stack
+#[no_mangle]
+pub static STACK_SIZE: usize = 0x2000;
+#[no_mangle]
+pub static HEAP_SIZE: usize = 0x4000;
+
+#[no_mangle]
 pub fn terminate() -> ! {
     // cleanup
-    // @TODO
+    // @TODO (seems to be unnecessary)
 
     // invoke ECALL
     syscall_1(0);
@@ -38,6 +45,12 @@ pub unsafe extern "C" fn _start() -> ! {
         fn heap_start();
         fn heap_end();
     }
+
+    // initialize .bss section with zeros
+    let bss_range = (bss_start as usize)..(bss_end as usize);
+    bss_range.for_each(|a| unsafe {
+        (a as *mut u8).write_volatile(0);
+    });
 
     // initialization of Heap allocator
     allocator::ALLOCATOR.init();
