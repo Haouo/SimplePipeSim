@@ -53,7 +53,7 @@ pub unsafe extern "C" fn _start() -> ! {
     });
 
     // initialization of Heap allocator
-    allocator::ALLOCATOR.init();
+    allocator::ALLOCATOR.init(heap_start as u32, heap_end as u32);
 
     extern "Rust" {
         fn main();
