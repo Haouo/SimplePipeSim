@@ -3,11 +3,10 @@
 
 use core::fmt::Write;
 use runtime::basic_io::Stdout;
-use runtime::terminate;
 
-fn main() -> ! {
+#[no_mangle]
+fn main() {
     for i in 0..100 {
-        writeln!(Stdout, "{}", i);
+        let _ = writeln!(Stdout, "{}", i);
     }
-    terminate();
 }

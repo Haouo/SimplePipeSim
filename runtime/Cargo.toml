@@ -8,5 +8,5 @@ name = "hello"
 path = "bin/hello.rs"
 
 [[bin]]
-name = "print_numbers"
+name = "print_nums"
 path = "bin/print_nums.rs"

@@ -9,19 +9,24 @@ fn __internal_syscall(reg_a0: u32, reg_a1: u32) {
     }
 }
 
-#[inline(always)]
-pub fn syscall_1(reg_a0: u32) {
-    __internal_syscall(reg_a0, 0);
-}
-
-#[inline(always)]
-pub fn syscall_2(reg_a0: u32, reg_a1: u32) {
-    __internal_syscall(reg_a0, reg_a1);
+macro_rules! syscall {
+    ($a:expr) => {
+        __internal_syscall($a, 0)
+    };
+    ($a:expr, $b:expr) => {
+        __internal_syscall($a, $b)
+    };
 }
 
 #[inline(always)]
 fn platform_outb(single_char: char) {
-    syscall_2(1, single_char as u32);
+    syscall!(1, single_char as u32);
+}
+
+#[inline(always)]
+pub fn exit_success() -> ! {
+    syscall!(0);
+    unreachable!();
 }
 
 /// Unit struct for implementing text display

@@ -1,7 +1,7 @@
 use crate::hardware::clock::Clocked;
 use crate::hardware::mem::abstract_mem::*;
 
-const MEM_SIZE: usize = 0x100000;
+const MEM_SIZE: usize = 0x40000;
 const MAIN_MEM_LATENCY: usize = 50; // each memory access takes 50 cycles to finish
 
 pub struct SimpleMem {
@@ -45,7 +45,8 @@ impl AbstractMemoryInterface for SimpleMem {
         // check whether the given address is legal
         assert!(
             req.get_addr() < (MEM_SIZE as u32),
-            "Out-of-bound access is not allowed"
+            "Out-of-bound access is not allowed, the request addr. is {:#08X}",
+            req.get_addr()
         );
 
         // whether the memory is busy now

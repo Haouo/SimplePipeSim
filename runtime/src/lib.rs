@@ -2,42 +2,40 @@
 
 extern crate alloc;
 
-use core::arch::asm;
+use core::arch::global_asm;
 use core::fmt::Write;
 use core::panic::PanicInfo;
 
-use basic_io::syscall_1;
+use basic_io::{exit_success, Stdout};
 
 // define the sizes of heap and stack
 #[no_mangle]
-pub static STACK_SIZE: usize = 0x2000;
+pub static STACK_SIZE: usize = 0x4000; // 16-KiB
 #[no_mangle]
-pub static HEAP_SIZE: usize = 0x4000;
+pub static HEAP_SIZE: usize = 0x4000; // 16-KiB
 
 #[no_mangle]
 pub fn terminate() -> ! {
     // cleanup
     // @TODO (seems to be unnecessary)
 
-    // invoke ECALL
-    syscall_1(0);
-
-    // dummy loop
-    unreachable!();
+    exit_success();
 }
 
-#[link_section = ".text._start"]
-#[no_mangle]
-pub unsafe extern "C" fn _start() -> ! {
-    // setup registers $gp and $sp
-    asm!(
-        ".option push",
-        ".option norelax",
-        "la gp, __global_pointer$",
-        ".option pop",
-        "la sp, stack_top",
-    );
+global_asm!(
+    ".section .text._start",
+    ".global _start",
+    "_start:",
+    ".option push",
+    ".option norelax",
+    "la gp, __global_pointer$",
+    ".option pop",
+    "la sp, stack_top",
+    "tail start",
+);
 
+#[no_mangle]
+pub unsafe extern "C" fn start() -> ! {
     // clean .bss section
     extern "C" {
         fn bss_start();
@@ -64,8 +62,8 @@ pub unsafe extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    writeln!(basic_io::Stdout, "Panicked!");
+fn panic(_info: &PanicInfo<'_>) -> ! {
+    let _ = writeln!(Stdout, "Panicked!");
     terminate();
 }
 

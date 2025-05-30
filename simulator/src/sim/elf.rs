@@ -39,10 +39,14 @@ pub fn elf_loader(file_path: &String) -> ProgramInfo {
         assert!(seg.address() + seg.size() < MEM_SIZE as u64); // memory boundary check
         let start_addr = seg.address() as usize;
         let end_addr = (seg.address() + seg.size()) as usize;
-        prog[start_addr..end_addr].copy_from_slice(
-            seg.data()
-                .expect("Data of loadable segment should not be None!"),
-        );
+        if seg.data().unwrap().len() > 0 {
+            prog[start_addr..end_addr].copy_from_slice(
+                seg.data()
+                    .expect("Data of loadable segment should not be None!"),
+            );
+        } else {
+            prog[start_addr..end_addr].clone_from_slice(&*vec![0u8; seg.size() as usize]);
+        }
     }
 
     // return value

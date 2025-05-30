@@ -1,6 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use super::super::clock::Clocked;
+
 /// define the abstract type of MemRequest
 #[derive(Clone)]
 pub struct MemoryLoadReq {
@@ -69,6 +71,6 @@ impl MemoryReqType {
 /// like L1-Cache, L2-Cache and Main Memory (DRAM)
 ///
 /// the generic parameter `T` represents the granularity for manipulation the memory device
-pub trait AbstractMemoryInterface {
+pub trait AbstractMemoryInterface: Clocked {
     fn try_register_req(&mut self, req: &MemoryReqType) -> Result<(), ()>;
 }

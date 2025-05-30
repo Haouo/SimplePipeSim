@@ -151,6 +151,7 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
 
             // * Lookup state
             MainStates::Lookup(ref req) => {
+                println!("Cache Lookup...");
                 let (tag, index, offset) = self.addr_transfer(req.get_addr());
                 let tag_compare_result = self.set[index].tag_compare(tag);
 
@@ -158,7 +159,6 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
                 match tag_compare_result {
                     // match arm 1: cache hit
                     Ok(way_index) => {
-                        println! {"Hit Way Index: {}", way_index};
                         // read the whole data block at first
                         let mut read_block = self.set[index].read_block(way_index);
 

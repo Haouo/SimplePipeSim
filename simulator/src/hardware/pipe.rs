@@ -111,32 +111,32 @@ impl PipelineProcessor {
                 .try_into()
                 .expect("The length of load data from L1-I$ should be 4.");
             self.if_raw_isnt_buffer = Some(u32::from_le_bytes(load_data_arr));
-        }
-
-        // if there is not inflight request to L1-I$, prepare for issuing new load request to L1-I$
-        // (do not consider whether the downstream is stalled at here)
-        if self.mem_is_waiting.is_none() {
-            let new_load_req = MemoryReqType::Load(MemoryLoadReq {
-                addr: self.if_pc,
-                len: 4,
-                done: Rc::new(Cell::new(false)),
-                buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
-            });
-            assert!(
+        } else {
+            // if there is not inflight request to L1-I$, prepare for issuing new load request to L1-I$
+            // (do not consider whether the downstream is stalled at here)
+            if self.mem_is_waiting.is_none() {
+                let new_load_req = MemoryReqType::Load(MemoryLoadReq {
+                    addr: self.if_pc,
+                    len: 4,
+                    done: Rc::new(Cell::new(false)),
+                    buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
+                });
+                assert!(
                 self.icache.try_register_req(&new_load_req).is_ok(),
                 "Memory request to L1-I$ should not fail, because L1-I$ is not shared resource."
             );
 
-            // need to wait the inflight request
-            if new_load_req.get_done() == false {
-                self.if_is_waiting = Some(new_load_req);
-                return;
+                // need to wait the inflight request
+                if new_load_req.get_done() == false {
+                    self.if_is_waiting = Some(new_load_req);
+                    return;
+                }
+                // cache is hit at current cycle
+                let load_data_arr: [u8; 4] = new_load_req.get_load_req_ref().buffer.borrow()[0..=3]
+                    .try_into()
+                    .expect("The length of load data from L1-I$ should be 4.");
+                self.if_raw_isnt_buffer = Some(u32::from_le_bytes(load_data_arr));
             }
-            // cache is hit at current cycle
-            let load_data_arr: [u8; 4] = new_load_req.get_load_req_ref().buffer.borrow()[0..=3]
-                .try_into()
-                .expect("The length of load data from L1-I$ should be 4.");
-            self.if_raw_isnt_buffer = Some(u32::from_le_bytes(load_data_arr));
         }
 
         let downstream_stalled = self.id_op.is_some()
@@ -496,7 +496,9 @@ impl PipelineProcessor {
                 }
                 AluOpTwoSelect::ImmSignExt => current_op.immediate_signext,
             };
+            println!("EXE op1: {}, op2: {}", op1, op2);
             // perform numerical calculations
+            // !!! TODO: there are problems about signed/unsigned arithmetics !!!
             match current_op.alu_op_type {
                 AluOpTypes::Add => current_op.alu_result = op1 + op2,
                 AluOpTypes::Sub => current_op.alu_result = op1 - op2,
@@ -645,58 +647,61 @@ impl PipelineProcessor {
                     .expect("The length of load data from L1-D$ should be 4");
                 load_data = Some(u32::from_le_bytes(load_data_arr));
             }
-        }
+        } else {
+            // no inflight memory request
+            // issue new request to L1-D$
+            if let Some(ref current_op) = self.mem_op {
+                if self.mem_op.as_ref().unwrap().is_mem {
+                    let mem_addr = current_op.alu_result;
+                    let new_mem_req = if current_op.is_store {
+                        let store_data: [u8; 4] = current_op
+                            .rs2
+                            .expect("STORE inst. should have rs2 register value!")
+                            .1
+                            .to_le_bytes();
+                        MemoryReqType::Store(MemoryStoreReq {
+                            addr: mem_addr,
+                            len: 4,
+                            store_data: Box::from(store_data),
+                            done: Rc::new(Cell::new(false)),
+                        })
+                    } else {
+                        MemoryReqType::Load(MemoryLoadReq {
+                            addr: mem_addr,
+                            len: 4,
+                            done: Rc::new(Cell::new(false)),
+                            buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
+                        })
+                    };
+                    // register new memory request
+                    println!("mem pc: {}", current_op.pc);
+                    assert!(self.dcache.try_register_req(&new_mem_req).is_ok(), "Memory request to L1-D$ should not fail, bacause L1-D$ is not shared resource.");
 
-        // issue new request to L1-D$
-        if let Some(ref current_op) = self.mem_op {
-            if self.mem_op.as_ref().unwrap().is_mem {
-                let mem_addr = current_op.alu_result;
-                let new_mem_req = if current_op.is_store {
-                    let store_data: [u8; 4] = current_op
-                        .rs2
-                        .expect("STORE inst. should have rs2 register value!")
-                        .1
-                        .to_le_bytes();
-                    MemoryReqType::Store(MemoryStoreReq {
-                        addr: mem_addr,
-                        len: 4,
-                        store_data: Box::from(store_data),
-                        done: Rc::new(Cell::new(false)),
-                    })
-                } else {
-                    MemoryReqType::Load(MemoryLoadReq {
-                        addr: mem_addr,
-                        len: 4,
-                        done: Rc::new(Cell::new(false)),
-                        buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
-                    })
-                };
-                // register new memory request
-                assert!(self.dcache.try_register_req(&new_mem_req).is_ok(), "Memory request to L1-D$ should not fail, bacause L1-D$ is not shared resource.");
+                    // check whether cache is hit in the current cycle
+                    if new_mem_req.get_done() == false {
+                        // cache miss
+                        self.mem_is_waiting = Some(new_mem_req);
+                        return;
+                    }
 
-                // check whether cache is hit in the current cycle
-                if new_mem_req.get_done() == false {
-                    // cache miss
-                    self.mem_is_waiting = Some(new_mem_req);
-                    return;
+                    // hit in current cycle
+                    if current_op.is_store == false {
+                        // LOAD inst.
+                        let load_data_arr: [u8; 4] = new_mem_req.get_load_req_ref().buffer.borrow()
+                            [0..=3]
+                            .try_into()
+                            .expect("The length of load data from L1-D$ should be 4.");
+                        load_data = Some(u32::from_le_bytes(load_data_arr));
+                    }
+                    // it does not to do anything for STORE isnt.
                 }
-
-                // hit in current cycle
-                if current_op.is_store == false {
-                    // LOAD inst.
-                    let load_data_arr: [u8; 4] = new_mem_req.get_load_req_ref().buffer.borrow()
-                        [0..=3]
-                        .try_into()
-                        .expect("The length of load data from L1-D$ should be 4.");
-                    load_data = Some(u32::from_le_bytes(load_data_arr));
-                }
-                // it does not to do anything for STORE isnt.
             }
         }
 
         // get load data from L1-D$
-        self.mem_op.as_mut().unwrap().rd_write_value =
-            Some(load_data.expect("Load data should not be None."));
+        if let Some(data) = load_data {
+            self.mem_op.as_mut().unwrap().rd_write_value = Some(data);
+        }
 
         // transfer mem_op to wb_op
         self.wb_op = self.mem_op.take();
@@ -821,6 +826,8 @@ impl Clocked for PipelineProcessor {
     /// We should consider the simulation order of pipeline stage carefully.
     /// The main reason is about data hazard and data forwarding.
     fn tick(&mut self) {
+        println!("PC: {}", self.if_pc);
+
         // handle branch recovery for branch miss-prediction
         if self.branch_recover {
             // revocer correct if_pc
@@ -852,15 +859,35 @@ impl Clocked for PipelineProcessor {
         self.pipe_stage_exe();
         self.pipe_stage_decode(stall_load_use_hazard);
         self.pipe_stage_fetch();
+
+        // tick L1-I$ and L1-D$
+        self.icache.tick();
+        self.dcache.tick();
     }
 }
 
 #[cfg(test)]
 mod unit_tests {
+    use super::super::mem::simple_mem::SimpleMem;
     use super::*;
+    use crate::sim::elf;
 
     #[test]
     fn hello_world() {
-        todo!();
+        let elf::ProgramInfo {
+            entry_pc,
+            prog_body,
+        } = elf::elf_loader(
+            &"/home/ubuntu/workspace/SimplePipeSim/target/riscv32im-unknown-none-elf/debug/hello"
+                .to_string(),
+        );
+
+        let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
+        let mut cpu = PipelineProcessor::new(entry_pc, Rc::clone(&mem));
+
+        while cpu.halt == false {
+            cpu.tick();
+            mem.borrow_mut().tick();
+        }
     }
 }
