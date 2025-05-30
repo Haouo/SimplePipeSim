@@ -17,6 +17,14 @@ const MUL_STALL: usize = 8;
 /// Additional stalls for integer DIV/REM instructions
 const DIV_REM_STALL: usize = 32;
 
+#[derive(Default)]
+enum PipelineMemoryFSM {
+    #[default]
+    Idle,
+    SendingReq(MemoryReqType),
+    WaitingComplete(MemoryReqType),
+}
+
 /// Public struct `PipelineProcessor`
 ///
 /// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor.
@@ -40,9 +48,10 @@ pub struct PipelineProcessor {
     mem_op: Option<PreDecodeMicroOp>,
     wb_op: Option<PreDecodeMicroOp>,
 
-    // waiting information about memory related stages (ID and MEM)
-    if_is_waiting: Option<MemoryReqType>, // second variable is the branch prediction result of the IF PC
-    mem_is_waiting: Option<MemoryReqType>,
+    // FSM control logics about memory related stages (ID and MEM)
+    if_fsm: PipelineMemoryFSM,
+    mem_fsm: PipelineMemoryFSM,
+    mem_load_buffer: Option<u32>,
 
     // information for branch misprediction
     branch_recover: bool,
@@ -74,8 +83,9 @@ impl PipelineProcessor {
             exe_op: None,
             mem_op: None,
             wb_op: None,
-            if_is_waiting: None,
-            mem_is_waiting: None,
+            if_fsm: PipelineMemoryFSM::default(),
+            mem_fsm: PipelineMemoryFSM::default(),
+            mem_load_buffer: None,
             branch_recover: false,
             branch_correct_direction: false,
             branch_destination: 0,
@@ -99,43 +109,61 @@ impl PipelineProcessor {
 
     /// ### Instruction Fetch Pipeline Stage Function
     fn pipe_stage_fetch(&mut self) {
-        // check whether there is inflight memory load request
-        if let Some(ref mem_req_ref) = self.if_is_waiting {
-            if mem_req_ref.get_done() == false {
-                return;
-            }
-
-            // inflight request is done (it should take out if_is_wating and leaves it as None)
-            let take_mem_req = self.if_is_waiting.take().unwrap();
-            let load_data_arr: [u8; 4] = take_mem_req.get_load_req_ref().buffer.borrow()[0..=3]
-                .try_into()
-                .expect("The length of load data from L1-I$ should be 4.");
-            self.if_raw_isnt_buffer = Some(u32::from_le_bytes(load_data_arr));
-        } else {
-            // if there is not inflight request to L1-I$, prepare for issuing new load request to L1-I$
-            // (do not consider whether the downstream is stalled at here)
-            if self.mem_is_waiting.is_none() {
-                let new_load_req = MemoryReqType::Load(MemoryLoadReq {
+        match self.if_fsm {
+            PipelineMemoryFSM::Idle => {
+                let new_req = MemoryReqType::Load(MemoryLoadReq {
                     addr: self.if_pc,
                     len: 4,
                     done: Rc::new(Cell::new(false)),
-                    buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
+                    buffer: Rc::new(RefCell::from(vec![0u8; 4].into_boxed_slice())),
                 });
-                assert!(
-                self.icache.try_register_req(&new_load_req).is_ok(),
-                "Memory request to L1-I$ should not fail, because L1-I$ is not shared resource."
-            );
-
-                // need to wait the inflight request
-                if new_load_req.get_done() == false {
-                    self.if_is_waiting = Some(new_load_req);
+                if self.icache.try_register_req(&new_req).is_err() {
+                    self.if_fsm = PipelineMemoryFSM::SendingReq(new_req);
                     return;
                 }
-                // cache is hit at current cycle
-                let load_data_arr: [u8; 4] = new_load_req.get_load_req_ref().buffer.borrow()[0..=3]
+
+                // succesfully register new request to icache
+                // check whether it is hit in the current cycle
+                if new_req.get_done() == false {
+                    self.if_fsm = PipelineMemoryFSM::WaitingComplete(new_req);
+                    return;
+                }
+
+                // get data in the current cycle
+                let load_data_arr: [u8; 4] = new_req.get_load_req_ref().buffer.borrow()[0..=3]
                     .try_into()
-                    .expect("The length of load data from L1-I$ should be 4.");
-                self.if_raw_isnt_buffer = Some(u32::from_le_bytes(load_data_arr));
+                    .expect("The length of fetched inst. in IF Stage should be 4!");
+                let load_data = u32::from_le_bytes(load_data_arr);
+                self.if_raw_isnt_buffer = Some(load_data);
+            }
+            PipelineMemoryFSM::SendingReq(ref new_req) => {
+                if self.icache.try_register_req(new_req).is_err() {
+                    return;
+                }
+                if new_req.get_done() == false {
+                    // need to wait for icache
+                    self.if_fsm = PipelineMemoryFSM::WaitingComplete(new_req.clone());
+                    return;
+                }
+
+                // get data in the current cycle
+                let load_data_arr: [u8; 4] = new_req.get_load_req_ref().buffer.borrow()[0..=3]
+                    .try_into()
+                    .expect("The length of fetched inst. in IF Stage should be 4!");
+                let load_data = u32::from_le_bytes(load_data_arr);
+                self.if_raw_isnt_buffer = Some(load_data);
+            }
+            PipelineMemoryFSM::WaitingComplete(ref inflight_req) => {
+                if inflight_req.get_done() == false {
+                    return;
+                }
+
+                // get data in the current cycle
+                let load_data_arr: [u8; 4] = inflight_req.get_load_req_ref().buffer.borrow()[0..=3]
+                    .try_into()
+                    .expect("The length of fetched inst. in IF Stage should be 4!");
+                let load_data = u32::from_le_bytes(load_data_arr);
+                self.if_raw_isnt_buffer = Some(load_data);
             }
         }
 
@@ -143,6 +171,14 @@ impl PipelineProcessor {
             | self.exe_op.is_some()
             | self.mem_op.is_some()
             | self.wb_op.is_some();
+
+        // println!(
+        //     "ID {} EXE {} MEM {} WB {}",
+        //     self.id_op.is_some(),
+        //     self.exe_op.is_some(),
+        //     self.mem_op.is_some(),
+        //     self.wb_op.is_some()
+        // );
         // propagate uOp __only when__ downstream __is not__ stalled
         if downstream_stalled == false {
             // small pre-decoding logic for checking control-flow inst.
@@ -194,6 +230,9 @@ impl PipelineProcessor {
                     ..Default::default()
                 })
             };
+
+            // reset if_fsm
+            self.if_fsm = PipelineMemoryFSM::Idle;
         } // if downstream is stalled while the fetched data is ready, just pass current cycle and caches the fetch data
     }
 
@@ -453,6 +492,10 @@ impl PipelineProcessor {
 
         // handle current inst. at EXE stage
         if let Some(ref mut current_op) = self.exe_op {
+            if let Instruction::Ecall(_) = current_op.inst {
+                self.mem_op = self.exe_op.take();
+                return;
+            }
             // special actions for M-extension inst.
             match current_op.inst {
                 Instruction::Mul(_)
@@ -496,12 +539,11 @@ impl PipelineProcessor {
                 }
                 AluOpTwoSelect::ImmSignExt => current_op.immediate_signext,
             };
-            println!("EXE op1: {}, op2: {}", op1, op2);
             // perform numerical calculations
             // !!! TODO: there are problems about signed/unsigned arithmetics !!!
             match current_op.alu_op_type {
-                AluOpTypes::Add => current_op.alu_result = op1 + op2,
-                AluOpTypes::Sub => current_op.alu_result = op1 - op2,
+                AluOpTypes::Add => current_op.alu_result = (op1 as i32 + op2 as i32) as u32,
+                AluOpTypes::Sub => current_op.alu_result = (op1 as i32 - op2 as i32) as u32,
                 AluOpTypes::Sll => current_op.alu_result = op1 << (op2 & 0x1f),
                 AluOpTypes::Slt => {
                     current_op.alu_result = if (op1 as i32) < (op2 as i32) {
@@ -517,40 +559,50 @@ impl PipelineProcessor {
                 AluOpTypes::Or => current_op.alu_result = op1 | op2,
                 AluOpTypes::And => current_op.alu_result = op1 & op2,
                 AluOpTypes::Mul => {
-                    current_op.alu_result = (((op1 as i32) as i64) * ((op2 as i32) as i64)) as u32
+                    current_op.alu_result = (((op1 as i32) as i64) * ((op2 as i32) as i64)) as u32;
+                    self.int_mul_div_stall_countdown = None;
                 }
                 AluOpTypes::Mulh => {
                     current_op.alu_result =
-                        ((((op1 as i32) as i64) * ((op2 as i32) as i64)) >> 32) as u32
+                        ((((op1 as i32) as i64) * ((op2 as i32) as i64)) >> 32) as u32;
+                    self.int_mul_div_stall_countdown = None;
                 }
                 AluOpTypes::Mulhu => {
-                    current_op.alu_result = ((op1 as u64) * (op2 as u64) >> 32) as u32
+                    current_op.alu_result = ((op1 as u64) * (op2 as u64) >> 32) as u32;
+                    self.int_mul_div_stall_countdown = None;
                 }
                 AluOpTypes::Mulhsu => {
-                    current_op.alu_result = (((op1 as i32) as i64) * (op2 as i64) >> 32) as u32
+                    current_op.alu_result = (((op1 as i32) as i64) * (op2 as i64) >> 32) as u32;
+                    self.int_mul_div_stall_countdown = None;
                 }
                 AluOpTypes::Div => {
                     current_op.alu_result = if op2 != 0 {
                         (((op1 as i32) as i64) / ((op1 as i32) as i64)) as u32
                     } else {
                         0xffff_ffffu32
-                    }
+                    };
+                    self.int_mul_div_stall_countdown = None;
                 }
                 AluOpTypes::Divu => {
                     current_op.alu_result = if op2 != 0 {
                         ((op1 as u64) / (op2 as u64)) as u32
                     } else {
                         0xffff_ffffu32
-                    }
+                    };
+                    self.int_mul_div_stall_countdown = None;
                 }
                 AluOpTypes::Rem => {
                     current_op.alu_result = if op2 != 0 {
                         ((op1 as i32) % (op2 as i32)) as u32
                     } else {
                         op1
-                    }
+                    };
+                    self.int_mul_div_stall_countdown = None;
                 }
-                AluOpTypes::Remu => current_op.alu_result = if op2 != 0 { op1 % op2 } else { op1 },
+                AluOpTypes::Remu => {
+                    current_op.alu_result = if op2 != 0 { op1 % op2 } else { op1 };
+                    self.int_mul_div_stall_countdown = None;
+                }
             }
 
             // whether current ALU Result is write-back data to destination register rd
@@ -626,82 +678,114 @@ impl PipelineProcessor {
         if self.mem_op.is_none() {
             return;
         }
-        // stall if downstream stage is stalled
-        if self.wb_op.is_some() {
-            return;
-        }
 
-        // temporal storage for load data
-        let mut load_data: Option<u32> = None;
+        // handle the interaction with dcache
+        match self.mem_fsm {
+            PipelineMemoryFSM::Idle => {
+                // issue new request to dcache
+                if let Some(ref current_op) = self.mem_op {
+                    if current_op.is_mem {
+                        // first check access length
+                        let access_length = match current_op.inst {
+                            Instruction::Lw(_) | Instruction::Sw(_) => 4,
+                            Instruction::Lh(_) | Instruction::Lhu(_) | Instruction::Sh(_) => 2,
+                            Instruction::Lb(_) | Instruction::Lbu(_) | Instruction::Sb(_) => 1,
+                            _ => unreachable!(),
+                        };
 
-        // check inflight memory request
-        if let Some(ref inflight_mem_req) = self.mem_is_waiting {
-            // not ready
-            if inflight_mem_req.get_done() == false {
-                return;
-            }
-            // inflight request is done and it is LOAD inst.
-            if let MemoryReqType::Load(load_req) = inflight_mem_req {
-                let load_data_arr: [u8; 4] = load_req.buffer.borrow()[0..=3]
-                    .try_into()
-                    .expect("The length of load data from L1-D$ should be 4");
-                load_data = Some(u32::from_le_bytes(load_data_arr));
-            }
-        } else {
-            // no inflight memory request
-            // issue new request to L1-D$
-            if let Some(ref current_op) = self.mem_op {
-                if self.mem_op.as_ref().unwrap().is_mem {
-                    let mem_addr = current_op.alu_result;
-                    let new_mem_req = if current_op.is_store {
-                        let store_data: [u8; 4] = current_op
-                            .rs2
-                            .expect("STORE inst. should have rs2 register value!")
-                            .1
-                            .to_le_bytes();
-                        MemoryReqType::Store(MemoryStoreReq {
-                            addr: mem_addr,
-                            len: 4,
-                            store_data: Box::from(store_data),
-                            done: Rc::new(Cell::new(false)),
-                        })
-                    } else {
-                        MemoryReqType::Load(MemoryLoadReq {
-                            addr: mem_addr,
-                            len: 4,
-                            done: Rc::new(Cell::new(false)),
-                            buffer: Rc::new(RefCell::new(Box::from([0u8; 4]))),
-                        })
-                    };
-                    // register new memory request
-                    println!("mem pc: {}", current_op.pc);
-                    assert!(self.dcache.try_register_req(&new_mem_req).is_ok(), "Memory request to L1-D$ should not fail, bacause L1-D$ is not shared resource.");
+                        let new_req = if current_op.is_store {
+                            MemoryReqType::Store(MemoryStoreReq {
+                                addr: current_op.alu_result,
+                                len: access_length,
+                                store_data: Box::from(current_op.rs2.unwrap().1.to_le_bytes()),
+                                done: Rc::new(Cell::new(false)),
+                            })
+                        } else {
+                            MemoryReqType::Load(MemoryLoadReq {
+                                addr: current_op.alu_result,
+                                len: access_length,
+                                done: Rc::new(Cell::new(false)),
+                                buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+                            })
+                        };
+                        if self.dcache.try_register_req(&new_req).is_err() {
+                            self.mem_fsm = PipelineMemoryFSM::SendingReq(new_req);
+                            return;
+                        }
 
-                    // check whether cache is hit in the current cycle
-                    if new_mem_req.get_done() == false {
-                        // cache miss
-                        self.mem_is_waiting = Some(new_mem_req);
-                        return;
+                        // register new request to dcache successfully
+                        // check whether it is hit
+                        if new_req.get_done() == false {
+                            self.mem_fsm = PipelineMemoryFSM::WaitingComplete(new_req);
+                            return;
+                        }
+                        // cache hit at the current cycle
+                        if current_op.is_store == false {
+                            // for load inst.
+                            let load_data_arr: [u8; 4] = new_req.get_load_req_ref().buffer.borrow()
+                                [0..=3]
+                                .try_into()
+                                .unwrap();
+                            self.mem_load_buffer = Some(u32::from_le_bytes(load_data_arr));
+                        }
                     }
+                }
+            }
+            PipelineMemoryFSM::SendingReq(ref new_req) => {
+                if self.dcache.try_register_req(new_req).is_err() {
+                    return;
+                }
 
-                    // hit in current cycle
-                    if current_op.is_store == false {
-                        // LOAD inst.
-                        let load_data_arr: [u8; 4] = new_mem_req.get_load_req_ref().buffer.borrow()
-                            [0..=3]
-                            .try_into()
-                            .expect("The length of load data from L1-D$ should be 4.");
-                        load_data = Some(u32::from_le_bytes(load_data_arr));
-                    }
-                    // it does not to do anything for STORE isnt.
+                // register new request to dcache successfully
+                // check whether it is hit
+                if new_req.get_done() == false {
+                    self.mem_fsm = PipelineMemoryFSM::WaitingComplete(new_req.clone());
+                    return;
+                }
+                // cache hit at the current cycle
+                if self.mem_op.as_ref().unwrap().is_store == false {
+                    // for load inst.
+                    let load_data_arr: [u8; 4] = new_req.get_load_req_ref().buffer.borrow()[0..=3]
+                        .try_into()
+                        .unwrap();
+                    self.mem_load_buffer = Some(u32::from_le_bytes(load_data_arr));
+                }
+            }
+            PipelineMemoryFSM::WaitingComplete(ref inflight_req) => {
+                if inflight_req.get_done() == false {
+                    return;
+                }
+                // cache hit at the current cycle
+                if self.mem_op.as_ref().unwrap().is_store == false {
+                    // for load inst.
+                    let load_data_arr: [u8; 4] = inflight_req.get_load_req_ref().buffer.borrow()
+                        [0..=3]
+                        .try_into()
+                        .unwrap();
+                    self.mem_load_buffer = Some(u32::from_le_bytes(load_data_arr));
                 }
             }
         }
 
-        // get load data from L1-D$
-        if let Some(data) = load_data {
-            self.mem_op.as_mut().unwrap().rd_write_value = Some(data);
+        // stall if downstream is stalled
+        if self.wb_op.is_some() {
+            return;
         }
+
+        // move load data from buffer to rd_write_value
+        // need to handle signed or zero extension at here
+        if let Some(load_data) = self.mem_load_buffer.take() {
+            self.mem_op.as_mut().unwrap().rd_write_value = match self.mem_op.as_ref().unwrap().inst
+            {
+                Instruction::Lhu(_) | Instruction::Lbu(_) | Instruction::Lw(_) => Some(load_data),
+                Instruction::Lh(_) => Some((((load_data << 16) as i32) >> 16) as u32),
+                Instruction::Lb(_) => Some((((load_data << 24) as i32) >> 24) as u32),
+                _ => unreachable!(),
+            }
+        }
+
+        // reset mem_fsm
+        self.mem_fsm = PipelineMemoryFSM::Idle;
 
         // transfer mem_op to wb_op
         self.wb_op = self.mem_op.take();
@@ -723,17 +807,16 @@ impl PipelineProcessor {
             } else if reg_a0 == 1 {
                 print!("{}", char::from_u32(reg_a1 & 0xff).unwrap()); // print a character which is stored in $a1
             }
-            return;
         }
 
         // handle current instruction in WB stage
         let current_op = self.wb_op.take().unwrap(); // take() consumes wb_op
-        if current_op.rd_index.is_none() {
-            return; // no write back
+        if let Some(rd_index) = current_op.rd_index {
+            if rd_index != 0 {
+                self.id_regs[current_op.rd_index.unwrap() as usize] =
+                    current_op.rd_write_value.unwrap();
+            }
         }
-        self.id_regs[current_op.rd_index.unwrap() as usize] = current_op.rd_write_value.expect(
-            "The write value into $rd register should not be None when rd_index is not None. It makes no sense.",
-        );
     }
 
     /// Try to solve RAW hazards before the start of a new cycle by using data forwarding
@@ -826,12 +909,14 @@ impl Clocked for PipelineProcessor {
     /// We should consider the simulation order of pipeline stage carefully.
     /// The main reason is about data hazard and data forwarding.
     fn tick(&mut self) {
-        println!("PC: {}", self.if_pc);
+        // println!("IF PC: {:#X}", self.if_pc);
 
         // handle branch recovery for branch miss-prediction
         if self.branch_recover {
-            // revocer correct if_pc
+            // revocer correct if_pc and clean fetched inst. or inflight request
             self.if_pc = self.branch_destination;
+            self.if_fsm = PipelineMemoryFSM::default();
+            self.if_raw_isnt_buffer = None;
 
             // flush pipeline stages
             if self.branch_flushes >= 2 {
@@ -842,6 +927,8 @@ impl Clocked for PipelineProcessor {
             }
             if self.branch_flushes >= 4 {
                 self.mem_op = None;
+                self.mem_fsm = PipelineMemoryFSM::default();
+                self.mem_load_buffer = None;
             }
             if self.branch_flushes >= 5 {
                 self.wb_op = None;
@@ -850,6 +937,9 @@ impl Clocked for PipelineProcessor {
             // update Branch Predictor
             self.branch_predictor
                 .mispredict_recovery(self.branch_correct_direction, self.branch_destination);
+
+            // clean self.branch_recover flag
+            self.branch_recover = false;
         }
 
         // start new simulation cycle
@@ -889,5 +979,20 @@ mod unit_tests {
             cpu.tick();
             mem.borrow_mut().tick();
         }
+    }
+
+    // #[test]
+    fn mem_to_exe_normal_hazard() {
+        todo!();
+    }
+
+    // #[test]
+    fn wb_to_exe_normal_hazard() {
+        todo!();
+    }
+
+    // #[test]
+    fn load_use_hazard() {
+        todo!();
     }
 }

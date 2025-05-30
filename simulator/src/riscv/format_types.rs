@@ -1,12 +1,12 @@
 #[inline(always)]
-fn sign_ext(data: u32, bit_widtgh: usize) -> u32 {
+fn sign_ext_helper(data: u32, bit_widtgh: usize) -> u32 {
     assert!(bit_widtgh <= 32);
     let shamt = 32 - bit_widtgh;
     let sign_ext_data: i32 = ((data << shamt) as i32) >> shamt;
     sign_ext_data as u32
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct RType(pub u32);
 impl RType {
     #[inline(always)]
@@ -31,7 +31,7 @@ impl RType {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct IType(pub u32);
 impl IType {
     #[inline(always)]
@@ -52,11 +52,11 @@ impl IType {
     }
     #[inline(always)]
     pub fn imm_sign_ext(&self) -> u32 {
-        sign_ext(self.imm11_0(), 12)
+        sign_ext_helper(self.imm11_0(), 12)
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct SType(pub u32);
 impl SType {
     #[inline(always)]
@@ -82,11 +82,11 @@ impl SType {
     #[inline(always)]
     pub fn sign_ext(&self) -> u32 {
         let origin_imm = (self.imm11_5() << 5) + self.imm4_0();
-        sign_ext(origin_imm, 12)
+        sign_ext_helper(origin_imm, 12)
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct BType(pub u32);
 impl BType {
     #[inline(always)]
@@ -123,11 +123,11 @@ impl BType {
             + (self.imm11() << 11)
             + (self.imm10_5() << 5)
             + (self.imm4_1() << 1);
-        sign_ext(origin_imm, 13)
+        sign_ext_helper(origin_imm, 13)
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct UType(pub u32);
 impl UType {
     #[inline(always)]
@@ -144,7 +144,7 @@ impl UType {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct JType(pub u32);
 impl JType {
     #[inline(always)]
@@ -169,10 +169,10 @@ impl JType {
     }
     #[inline(always)]
     pub fn sign_ext(&self) -> u32 {
-        let origin_imm = (self.imm20() << 12)
+        let origin_imm = (self.imm20() << 20)
             + (self.imm19_12() << 12)
             + (self.imm11() << 11)
             + (self.imm10_1() << 1);
-        sign_ext(origin_imm, 21)
+        sign_ext_helper(origin_imm, 21)
     }
 }

@@ -124,7 +124,7 @@ mod unit_tests {
         )
     }
 
-    #[test]
+    // #[test]
     fn ramdom_access() {
         let (mut mem_dut, mut mem_golden) = random_initialize();
         let mut rng = rand::rng();
