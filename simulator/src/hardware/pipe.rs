@@ -991,7 +991,7 @@ mod unit_tests {
     use std::fs;
     use std::path::Path;
 
-    // #[test]
+    #[test]
     fn riscv_tests() {
         let inst_list: Vec<&str> = vec![
             "rv32ui-p-lui",
@@ -1067,37 +1067,22 @@ mod unit_tests {
     }
 
     #[test]
-    fn hello_world() {
-        // let path = Path::new("target/riscv32im-unknown-none-elf/debug/hello");
-        let path = Path::new("../riscv-tests/isa/print_nums");
-        let elf::ProgramInfo {
-            entry_pc,
-            prog_body,
-        } = elf::elf_loader(path);
-        let mem_1 = SimpleMem::new(prog_body.clone());
-        let mem_2 = SimpleMem::new(prog_body);
-        let mut cpu = PipelineProcessor::new(entry_pc, mem_1, mem_2);
+    fn general_programs() {
+        let general_prog_names: Vec<&str> = vec!["hello, print_nums"];
+        let path_prefix = Path::new("../target/riscv32im-unknown-none-elf/debug");
+        for prog_name in general_prog_names {
+            let elf::ProgramInfo {
+                entry_pc,
+                prog_body,
+            } = elf::elf_loader(&path_prefix.join(prog_name));
 
-        let mut cycle = 0usize;
-        while cpu.halt == false {
-            cpu.tick();
-            cycle += 1;
+            let mem_1 = SimpleMem::new(prog_body.clone());
+            let mem_2 = SimpleMem::new(prog_body);
+            let mut cpu = PipelineProcessor::new(entry_pc, mem_1, mem_2);
+
+            while cpu.halt == false {
+                cpu.tick();
+            }
         }
-        println!("Total runned cycle: {}", cycle);
-    }
-
-    // #[test]
-    fn mem_to_exe_normal_hazard() {
-        todo!();
-    }
-
-    // #[test]
-    fn wb_to_exe_normal_hazard() {
-        todo!();
-    }
-
-    // #[test]
-    fn load_use_hazard() {
-        todo!();
     }
 }

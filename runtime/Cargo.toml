@@ -11,10 +11,10 @@ path = "bin/hello.rs"
 name = "print_nums"
 path = "bin/print_nums.rs"
 
-[[bin]]
-name = "qsort"
-path = "bin/qsort.rs"
+# [[bin]]
+# name = "qsort"
+# path = "bin/qsort.rs"
 
-[[bin]]
-name = "msort"
-path = "bin/msort.rs"
+# [[bin]]
+# name = "msort"
+# path = "bin/msort.rs"
