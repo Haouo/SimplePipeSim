@@ -62,8 +62,8 @@ pub unsafe extern "C" fn start() -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    let _ = writeln!(Stdout, "Panicked!");
+fn panic(info: &PanicInfo<'_>) -> ! {
+    let _ = writeln!(Stdout, "Panicked! {}", info.message());
     terminate();
 }
 

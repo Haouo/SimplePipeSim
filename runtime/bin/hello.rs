@@ -6,5 +6,5 @@ use runtime;
 
 #[no_mangle]
 fn main() {
-    let _ = write!(runtime::basic_io::Stdout, "Hello, World!");
+    let _ = writeln!(runtime::basic_io::Stdout, "Hello, World!").is_ok();
 }

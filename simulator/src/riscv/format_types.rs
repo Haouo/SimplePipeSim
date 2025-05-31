@@ -11,11 +11,11 @@ pub struct RType(pub u32);
 impl RType {
     #[inline(always)]
     pub fn rs1(&self) -> u8 {
-        ((self.0 >> 20) & 0x1f) as u8
+        ((self.0 >> 15) & 0x1f) as u8
     }
     #[inline(always)]
     pub fn rs2(&self) -> u8 {
-        ((self.0 >> 15) & 0x1f) as u8
+        ((self.0 >> 20) & 0x1f) as u8
     }
     #[inline(always)]
     pub fn rd(&self) -> u8 {

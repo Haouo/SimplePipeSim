@@ -72,7 +72,7 @@ impl PipelineProcessor {
     /// The constructor of PipeState struct.
     ///
     /// This function also have the responsibility for initialization the object.
-    pub fn new(init_pc: u32, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
+    pub fn new(init_pc: u32, mem_1: SimpleMem, mem_2: SimpleMem) -> Self {
         PipelineProcessor {
             halt: false,
             if_pc: init_pc,
@@ -92,18 +92,20 @@ impl PipelineProcessor {
             branch_flushes: 0,
             int_mul_div_stall_countdown: None,
             // I$ configuration: 4096 bytes in total, 4-way associativity, 32 bytes for each block (implies 32 sets)
-            icache: Box::new(GeneralCache::<fifo::FifoRP>::new(
-                4096,
-                4,
-                32,
-                Rc::clone(&mem_ref),
-            )),
-            dcache: Box::new(GeneralCache::<fifo::FifoRP>::new(
-                4096,
-                4,
-                32,
-                Rc::clone(&mem_ref),
-            )),
+            // icache: Box::new(GeneralCache::<fifo::FifoRP>::new(
+            //     4096,
+            //     4,
+            //     32,
+            //     Rc::clone(&mem_ref),
+            // )),
+            // dcache: Box::new(GeneralCache::<fifo::FifoRP>::new(
+            //     4096,
+            //     4,
+            //     32,
+            //     Rc::clone(&mem_ref),
+            // )),
+            icache: Box::new(mem_1),
+            dcache: Box::new(mem_2),
         }
     }
 
@@ -542,8 +544,8 @@ impl PipelineProcessor {
             // perform numerical calculations
             // !!! TODO: there are problems about signed/unsigned arithmetics !!!
             match current_op.alu_op_type {
-                AluOpTypes::Add => current_op.alu_result = (op1 as i32 + op2 as i32) as u32,
-                AluOpTypes::Sub => current_op.alu_result = (op1 as i32 - op2 as i32) as u32,
+                AluOpTypes::Add => current_op.alu_result = op1.wrapping_add(op2),
+                AluOpTypes::Sub => current_op.alu_result = op1.wrapping_sub(op2),
                 AluOpTypes::Sll => current_op.alu_result = op1 << (op2 & 0x1f),
                 AluOpTypes::Slt => {
                     current_op.alu_result = if (op1 as i32) < (op2 as i32) {
@@ -576,8 +578,9 @@ impl PipelineProcessor {
                     self.int_mul_div_stall_countdown = None;
                 }
                 AluOpTypes::Div => {
+                    let mut a = 0i64;
                     current_op.alu_result = if op2 != 0 {
-                        (((op1 as i32) as i64) / ((op1 as i32) as i64)) as u32
+                        (((op1 as i32) as i64) / ((op2 as i32) as i64)) as u32
                     } else {
                         0xffff_ffffu32
                     };
@@ -593,7 +596,7 @@ impl PipelineProcessor {
                 }
                 AluOpTypes::Rem => {
                     current_op.alu_result = if op2 != 0 {
-                        ((op1 as i32) % (op2 as i32)) as u32
+                        ((op1 as i32).wrapping_rem(op2 as i32)) as u32
                     } else {
                         op1
                     };
@@ -617,28 +620,51 @@ impl PipelineProcessor {
             if current_op.is_branch {
                 #[allow(unused_assignments)]
                 let mut is_taken = false;
+                let branch_op1 = current_op.rs1.or(Some((0, 0))).unwrap().1;
+                let branch_op2 = current_op.rs2.or(Some((0, 0))).unwrap().1;
+
                 match current_op.inst {
                     // unconditional branch
                     Instruction::Jal(_) | Instruction::Jalr(_) => is_taken = true,
                     // conditional branch
-                    Instruction::Beq(_) => is_taken = if op1 == op2 { true } else { false },
-                    Instruction::Bne(_) => is_taken = if op1 != op2 { true } else { false },
+                    Instruction::Beq(_) => {
+                        is_taken = if branch_op1 == branch_op2 {
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Instruction::Bne(_) => {
+                        is_taken = if branch_op1 != branch_op2 {
+                            true
+                        } else {
+                            false
+                        }
+                    }
                     Instruction::Blt(_) => {
-                        is_taken = if (op1 as i32) < (op2 as i32) {
+                        is_taken = if (branch_op1 as i32) < (branch_op2 as i32) {
                             true
                         } else {
                             false
                         }
                     }
                     Instruction::Bge(_) => {
-                        is_taken = if (op1 as i32) < (op2 as i32) {
+                        is_taken = if (branch_op1 as i32) >= (branch_op2 as i32) {
                             true
                         } else {
                             false
                         }
                     }
-                    Instruction::Bltu(_) => is_taken = if op1 < op2 { true } else { false },
-                    Instruction::Bgeu(_) => is_taken = if op1 >= op2 { true } else { false },
+                    Instruction::Bltu(_) => {
+                        is_taken = if branch_op1 < branch_op2 { true } else { false }
+                    }
+                    Instruction::Bgeu(_) => {
+                        is_taken = if branch_op1 >= branch_op2 {
+                            true
+                        } else {
+                            false
+                        }
+                    }
 
                     // non-branch inst.
                     _ => {
@@ -962,23 +988,102 @@ mod unit_tests {
     use super::*;
     use crate::sim::elf;
 
+    use std::fs;
+    use std::path::Path;
+
+    // #[test]
+    fn riscv_tests() {
+        let inst_list: Vec<&str> = vec![
+            "rv32ui-p-lui",
+            "rv32ui-p-add",
+            "rv32ui-p-sub",
+            "rv32ui-p-addi",
+            "rv32ui-p-and",
+            "rv32ui-p-andi",
+            "rv32ui-p-lw",
+            "rv32ui-p-lh",
+            "rv32ui-p-lhu",
+            "rv32ui-p-lb",
+            "rv32ui-p-lbu",
+            "rv32ui-p-sw",
+            "rv32ui-p-sh",
+            "rv32ui-p-sb",
+            "rv32ui-p-beq",
+            "rv32ui-p-bne",
+            "rv32ui-p-blt",
+            "rv32ui-p-bge",
+            "rv32ui-p-bltu",
+            "rv32ui-p-bgeu",
+            "rv32ui-p-jal",
+            "rv32ui-p-jalr",
+            "rv32ui-p-or",
+            "rv32ui-p-ori",
+            "rv32ui-p-sll",
+            "rv32ui-p-slli",
+            "rv32ui-p-sra",
+            "rv32ui-p-srai",
+            "rv32ui-p-srl",
+            "rv32ui-p-srli",
+            "rv32ui-p-slt",
+            "rv32ui-p-sltu",
+            "rv32ui-p-slti",
+            "rv32ui-p-sltiu",
+            "rv32ui-p-auipc",
+            "rv32um-p-mul",
+            "rv32um-p-mulh",
+            "rv32um-p-mulhu",
+            "rv32um-p-mulhsu",
+            "rv32um-p-div",
+            "rv32um-p-divu",
+            "rv32um-p-rem",
+            "rv32um-p-remu",
+        ];
+
+        // run each unit test for each instructions
+        let path_prefix = Path::new("../riscv-tests/isa");
+        for inst_name in inst_list {
+            let path = path_prefix.join(Path::new(inst_name));
+            let elf::ProgramInfo {
+                entry_pc,
+                prog_body,
+            } = elf::elf_loader(&path);
+            let mem_1 = SimpleMem::new(prog_body.clone());
+            let mem_2 = SimpleMem::new(prog_body.clone());
+            let mut cpu = PipelineProcessor::new(entry_pc, mem_1, mem_2);
+
+            while cpu.halt == false {
+                cpu.tick();
+            }
+
+            assert_eq!(
+                cpu.id_regs[3],
+                1, // it pass the test if the value in $gp is 1
+                "Does not pass test {}, the wrong TESTNUM is {}",
+                inst_name,
+                (cpu.id_regs[3] - 1) / 2
+            );
+            println!("Pass the test: {}", inst_name);
+        }
+    }
+
     #[test]
     fn hello_world() {
+        // let path = Path::new("target/riscv32im-unknown-none-elf/debug/hello");
+        let path = Path::new("../riscv-tests/isa/print_nums");
         let elf::ProgramInfo {
             entry_pc,
             prog_body,
-        } = elf::elf_loader(
-            &"/home/ubuntu/workspace/SimplePipeSim/target/riscv32im-unknown-none-elf/debug/hello"
-                .to_string(),
-        );
+        } = elf::elf_loader(path);
+        let mem_1 = SimpleMem::new(prog_body.clone());
+        let mem_2 = SimpleMem::new(prog_body);
+        let mut cpu = PipelineProcessor::new(entry_pc, mem_1, mem_2);
 
-        let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
-        let mut cpu = PipelineProcessor::new(entry_pc, Rc::clone(&mem));
-
+        let mut cycle = 0usize;
         while cpu.halt == false {
             cpu.tick();
-            mem.borrow_mut().tick();
+            cycle += 1;
         }
+        println!("Total runned cycle: {}", cycle);
     }
 
     // #[test]

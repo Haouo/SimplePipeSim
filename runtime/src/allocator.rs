@@ -44,6 +44,7 @@ pub mod bump_allocator {
 
         pub fn init(&self, heap_start: u32, heap_end: u32) {
             self.heap_start.set(heap_start);
+            self.next.set(heap_start);
             self.heap_end.set(heap_end);
         }
     }
@@ -69,6 +70,7 @@ pub mod bump_allocator {
                 null_mut()
             } else {
                 // allocate new heap memory
+                self.num_alloc.set(self.num_alloc.get() + 1);
                 self.next.set(alloc_end);
                 alloc_start as *mut u8
             }
@@ -79,9 +81,9 @@ pub mod bump_allocator {
             if self.num_alloc.get() == 0 {
                 panic!("Deallocation Error! There is no any allocated memory on the heap.");
             }
-            self.num_alloc.set(self.num_alloc.get() - 1);
 
             // deallocate all allocated memory at one times
+            self.num_alloc.set(self.num_alloc.get() - 1);
             if self.num_alloc.get() == 0 {
                 self.next.set(self.heap_start.get());
             }

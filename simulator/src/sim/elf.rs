@@ -1,5 +1,7 @@
 use object::{Object, ObjectSegment};
 
+use std::path::Path;
+
 const MEM_SIZE: usize = 0x40000;
 
 pub struct ProgramInfo {
@@ -7,7 +9,7 @@ pub struct ProgramInfo {
     pub prog_body: Vec<u8>,
 }
 
-pub fn elf_loader(file_path: &String) -> ProgramInfo {
+pub fn elf_loader(file_path: &Path) -> ProgramInfo {
     let file = std::fs::read(file_path).expect("Cannot read file!");
     let object_parse =
         object::File::parse(file.as_slice()).expect("Cannot parse the given ELF file!");
@@ -39,13 +41,20 @@ pub fn elf_loader(file_path: &String) -> ProgramInfo {
         assert!(seg.address() + seg.size() < MEM_SIZE as u64); // memory boundary check
         let start_addr = seg.address() as usize;
         let end_addr = (seg.address() + seg.size()) as usize;
-        if seg.data().unwrap().len() > 0 {
-            prog[start_addr..end_addr].copy_from_slice(
-                seg.data()
-                    .expect("Data of loadable segment should not be None!"),
-            );
+        let seg_data_len = seg.data().unwrap().len();
+        let len_diff = (end_addr - start_addr) - seg_data_len;
+
+        if len_diff > 0 {
+            if seg.data().unwrap().len() == 0 {
+                // zero padding
+                prog[start_addr..end_addr].copy_from_slice(&*vec![0u8; seg.size() as usize]);
+            } else {
+                prog[start_addr..(start_addr + seg_data_len)].copy_from_slice(seg.data().unwrap());
+                prog[(start_addr + seg_data_len)..end_addr].copy_from_slice(&*vec![0u8; len_diff]);
+                // zero padding
+            }
         } else {
-            prog[start_addr..end_addr].clone_from_slice(&*vec![0u8; seg.size() as usize]);
+            prog[start_addr..end_addr].copy_from_slice(seg.data().unwrap());
         }
     }
 
