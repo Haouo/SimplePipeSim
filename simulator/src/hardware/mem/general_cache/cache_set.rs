@@ -55,6 +55,9 @@ where
     }
 
     pub fn read_block(&mut self, way_index: usize) -> Box<[u8]> {
+        // check validness
+        assert!(self.valid_array[way_index]);
+
         let mut read_data = Vec::<u8>::with_capacity(self.bytes_per_block);
         for i in 0..self.bytes_per_block {
             read_data.push(self.data_array[(self.bytes_per_block * way_index) + i]);
@@ -64,10 +67,14 @@ where
     }
 
     pub fn write_block(&mut self, way_index: usize, write_data: &[u8]) {
+        // check validness
+        assert!(self.valid_array[way_index]);
+
         // modify data block
-        for (i, item) in write_data.iter().enumerate() {
-            self.data_array[(self.bytes_per_block * way_index) + i] = *item;
-        }
+        self.data_array
+            [(self.bytes_per_block * way_index)..(self.bytes_per_block * (way_index + 1))]
+            .clone_from_slice(write_data);
+
         // set dirty bit
         self.dirty_array[way_index] = true;
         // update replacement policy
@@ -78,9 +85,10 @@ where
 
     pub fn insert_block(&mut self, way_index: usize, new_tag: u32, new_data: &[u8]) {
         // modify data block
-        for (i, item) in new_data.iter().enumerate() {
-            self.data_array[(self.bytes_per_block * way_index) + i] = *item;
-        }
+        self.data_array
+            [(self.bytes_per_block * way_index)..(self.bytes_per_block * (way_index + 1))]
+            .clone_from_slice(new_data);
+
         // set valid bit
         self.valid_array[way_index] = true;
         // set tag

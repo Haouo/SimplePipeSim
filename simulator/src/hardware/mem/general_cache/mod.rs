@@ -1,5 +1,7 @@
-pub mod cache_set;
-pub mod replacement_policy;
+// sub-modules
+pub mod cache_set; // model for single cache set (might contains multiple ways)
+pub mod replacement_policy; // model for cache replacement policy (e.g., Random, FIFO, LRU)
+pub mod statistic; // utils of statistics for cache
 
 use crate::hardware::clock::Clocked;
 use crate::hardware::mem::abstract_mem::*;
@@ -134,7 +136,12 @@ impl<RP: ReplacementPolicy> AbstractMemoryInterface for GeneralCache<RP> {
                         self.store_count += 1;
                     }
                 }
-                self.tick(); // **INFO** 1 cycle pre-tick to imitate synchronous access
+
+                // **INFO** 1 cycle pre-tick to imitate synchronous access
+                /* --------------------------- */
+                self.tick();
+                /* --------------------------- */
+
                 return Ok(());
             }
             _ => {}
@@ -155,8 +162,6 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
 
             // * Lookup state
             MainStates::Lookup(ref req) => {
-                // println!("Cache Lookup...");
-                // println!("Cache Lookup...");
                 let (tag, index, offset) = self.addr_transfer(req.get_addr());
                 let tag_compare_result = self.set[index].tag_compare(tag);
 
@@ -170,16 +175,15 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
                         // handle read or write to the cache
                         match req {
                             MemoryReqType::Load(load_req) => {
-                                for i in 0..req.get_len() {
-                                    load_req.buffer.borrow_mut()[i] = read_block[offset + i];
-                                }
+                                load_req.buffer.borrow_mut().clone_from_slice(
+                                    &read_block[offset..(offset + req.get_len())],
+                                );
                                 load_req.done.set(true);
                             }
                             MemoryReqType::Store(store_req) => {
-                                for i in 0..req.get_len() {
-                                    read_block[offset + i] = store_req.store_data[i];
-                                }
-                                self.set[index].write_block(way_index, read_block.as_ref());
+                                read_block[offset..(offset + req.get_len())]
+                                    .clone_from_slice(&*store_req.store_data);
+                                self.set[index].write_block(way_index, &read_block);
                                 store_req.done.set(true);
                             }
                         }
@@ -259,7 +263,6 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
 
             // * write-back state -> handling write request to next-level memory via secondary FSM
             MainStates::WriteBack(ref mut second_state, ref evict_way) => {
-                // println!("Cache WriteBack...");
                 match second_state {
                     // try to send write request to next-level memory until it is accepted
                     StatesForOutMemReq::SendReq(ref req) => {
@@ -363,7 +366,7 @@ mod unit_tests {
         (cache, mem)
     }
 
-    // #[test]
+    #[test]
     fn allocate_without_write_back() {
         let (mut cache, mem) = initialize_system();
 
@@ -406,7 +409,7 @@ mod unit_tests {
         }
     }
 
-    // #[test]
+    #[test]
     fn cause_write_back() {
         let (mut cache, mem) = initialize_system();
         let num_set = 32u32;
@@ -437,7 +440,7 @@ mod unit_tests {
         let write_req = MemoryReqType::Store(MemoryStoreReq {
             addr: 0,
             len: 4,
-            store_data: vec![123u8; 4].into_boxed_slice(),
+            store_data: vec![116u8; 4].into_boxed_slice(),
             done: Rc::new(Cell::new(false)),
         });
         if cache.try_register_req(&write_req).is_err() {
@@ -489,7 +492,7 @@ mod unit_tests {
             mem.borrow_mut().tick();
         }
         for item in read_req.get_load_req_ref().buffer.borrow().iter() {
-            assert_eq!(*item, 123);
+            assert_eq!(*item, 116);
         }
     }
 

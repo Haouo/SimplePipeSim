@@ -93,12 +93,13 @@ pub mod fifo {
 
         fn evict(&mut self) -> (bool, usize) {
             for i in 0..self.valid.len() {
-                if !self.valid[i] {
+                if self.valid[i] == false {
                     return (false, i);
                 }
             }
-            self.valid[self.queue.len() - 1] = false;
-            (true, self.queue.pop_back().unwrap())
+            let evict_way_index = self.queue.pop_back().unwrap();
+            self.valid[evict_way_index] = false;
+            (true, evict_way_index)
         }
     }
 }

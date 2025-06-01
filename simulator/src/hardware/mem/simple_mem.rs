@@ -2,7 +2,7 @@ use crate::hardware::clock::Clocked;
 use crate::hardware::mem::abstract_mem::*;
 
 const MEM_SIZE: usize = 0x40000;
-const MAIN_MEM_LATENCY: usize = 0; // each memory access takes 50 cycles to finish
+const MAIN_MEM_LATENCY: usize = 50; // each memory access takes 50 cycles to finish
 
 pub struct SimpleMem {
     /// the data structure used to store instructions and data

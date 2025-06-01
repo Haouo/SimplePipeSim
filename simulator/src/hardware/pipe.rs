@@ -51,6 +51,7 @@ pub struct PipelineProcessor {
     // FSM control logics about memory related stages (ID and MEM)
     if_fsm: PipelineMemoryFSM,
     mem_fsm: PipelineMemoryFSM,
+    mem_access_length_buffer: Option<usize>,
     mem_load_buffer: Option<u32>,
 
     // information for branch misprediction
@@ -72,7 +73,7 @@ impl PipelineProcessor {
     /// The constructor of PipeState struct.
     ///
     /// This function also have the responsibility for initialization the object.
-    pub fn new(init_pc: u32, mem_1: SimpleMem, mem_2: SimpleMem) -> Self {
+    pub fn new(init_pc: u32, mem_ref: &Rc<RefCell<SimpleMem>>) -> Self {
         PipelineProcessor {
             halt: false,
             if_pc: init_pc,
@@ -85,6 +86,7 @@ impl PipelineProcessor {
             wb_op: None,
             if_fsm: PipelineMemoryFSM::default(),
             mem_fsm: PipelineMemoryFSM::default(),
+            mem_access_length_buffer: None,
             mem_load_buffer: None,
             branch_recover: false,
             branch_correct_direction: false,
@@ -92,20 +94,20 @@ impl PipelineProcessor {
             branch_flushes: 0,
             int_mul_div_stall_countdown: None,
             // I$ configuration: 4096 bytes in total, 4-way associativity, 32 bytes for each block (implies 32 sets)
-            // icache: Box::new(GeneralCache::<fifo::FifoRP>::new(
-            //     4096,
-            //     4,
-            //     32,
-            //     Rc::clone(&mem_ref),
-            // )),
-            // dcache: Box::new(GeneralCache::<fifo::FifoRP>::new(
-            //     4096,
-            //     4,
-            //     32,
-            //     Rc::clone(&mem_ref),
-            // )),
-            icache: Box::new(mem_1),
-            dcache: Box::new(mem_2),
+            icache: Box::new(GeneralCache::<fifo::FifoRP>::new(
+                4096,
+                8,
+                32,
+                Rc::clone(mem_ref),
+            )),
+            dcache: Box::new(GeneralCache::<fifo::FifoRP>::new(
+                4096,
+                4,
+                32,
+                Rc::clone(mem_ref),
+            )),
+            // icache: Box::new(mem_1),
+            // dcache: Box::new(mem_2),
         }
     }
 
@@ -718,12 +720,15 @@ impl PipelineProcessor {
                             Instruction::Lb(_) | Instruction::Lbu(_) | Instruction::Sb(_) => 1,
                             _ => unreachable!(),
                         };
+                        self.mem_access_length_buffer = Some(access_length);
 
                         let new_req = if current_op.is_store {
                             MemoryReqType::Store(MemoryStoreReq {
                                 addr: current_op.alu_result,
                                 len: access_length,
-                                store_data: Box::from(current_op.rs2.unwrap().1.to_le_bytes()),
+                                store_data: Box::from(
+                                    &current_op.rs2.unwrap().1.to_le_bytes()[0..access_length],
+                                ),
                                 done: Rc::new(Cell::new(false)),
                             })
                         } else {
@@ -731,7 +736,9 @@ impl PipelineProcessor {
                                 addr: current_op.alu_result,
                                 len: access_length,
                                 done: Rc::new(Cell::new(false)),
-                                buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+                                buffer: Rc::new(RefCell::new(
+                                    vec![0u8; access_length].into_boxed_slice(),
+                                )),
                             })
                         };
                         if self.dcache.try_register_req(&new_req).is_err() {
@@ -748,11 +755,14 @@ impl PipelineProcessor {
                         // cache hit at the current cycle
                         if current_op.is_store == false {
                             // for load inst.
-                            let load_data_arr: [u8; 4] = new_req.get_load_req_ref().buffer.borrow()
-                                [0..=3]
-                                .try_into()
-                                .unwrap();
-                            self.mem_load_buffer = Some(u32::from_le_bytes(load_data_arr));
+                            let mut tmp_vec =
+                                vec![0u8; self.mem_access_length_buffer.take().unwrap()];
+                            tmp_vec.clone_from_slice(&*new_req.get_load_req_ref().buffer.borrow());
+                            let mut load_data = 0u32;
+                            for (idx, a_byte) in tmp_vec.iter().enumerate() {
+                                load_data += (*a_byte as u32) << (8 * idx);
+                            }
+                            self.mem_load_buffer = Some(load_data);
                         }
                     }
                 }
@@ -771,10 +781,13 @@ impl PipelineProcessor {
                 // cache hit at the current cycle
                 if self.mem_op.as_ref().unwrap().is_store == false {
                     // for load inst.
-                    let load_data_arr: [u8; 4] = new_req.get_load_req_ref().buffer.borrow()[0..=3]
-                        .try_into()
-                        .unwrap();
-                    self.mem_load_buffer = Some(u32::from_le_bytes(load_data_arr));
+                    let mut tmp_vec = vec![0u8; self.mem_access_length_buffer.take().unwrap()];
+                    tmp_vec.clone_from_slice(&*new_req.get_load_req_ref().buffer.borrow());
+                    let mut load_data = 0u32;
+                    for (idx, a_byte) in tmp_vec.iter().enumerate() {
+                        load_data += (*a_byte as u32) << (8 * idx);
+                    }
+                    self.mem_load_buffer = Some(load_data);
                 }
             }
             PipelineMemoryFSM::WaitingComplete(ref inflight_req) => {
@@ -784,11 +797,13 @@ impl PipelineProcessor {
                 // cache hit at the current cycle
                 if self.mem_op.as_ref().unwrap().is_store == false {
                     // for load inst.
-                    let load_data_arr: [u8; 4] = inflight_req.get_load_req_ref().buffer.borrow()
-                        [0..=3]
-                        .try_into()
-                        .unwrap();
-                    self.mem_load_buffer = Some(u32::from_le_bytes(load_data_arr));
+                    let mut tmp_vec = vec![0u8; self.mem_access_length_buffer.take().unwrap()];
+                    tmp_vec.clone_from_slice(&*inflight_req.get_load_req_ref().buffer.borrow());
+                    let mut load_data = 0u32;
+                    for (idx, a_byte) in tmp_vec.iter().enumerate() {
+                        load_data += (*a_byte as u32) << (8 * idx);
+                    }
+                    self.mem_load_buffer = Some(load_data);
                 }
             }
         }
@@ -988,7 +1003,6 @@ mod unit_tests {
     use super::*;
     use crate::sim::elf;
 
-    use std::fs;
     use std::path::Path;
 
     #[test]
@@ -1047,12 +1061,12 @@ mod unit_tests {
                 entry_pc,
                 prog_body,
             } = elf::elf_loader(&path);
-            let mem_1 = SimpleMem::new(prog_body.clone());
-            let mem_2 = SimpleMem::new(prog_body.clone());
-            let mut cpu = PipelineProcessor::new(entry_pc, mem_1, mem_2);
+            let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
+            let mut cpu = PipelineProcessor::new(entry_pc, &mem);
 
             while cpu.halt == false {
                 cpu.tick();
+                mem.borrow_mut().tick();
             }
 
             assert_eq!(
@@ -1076,13 +1090,16 @@ mod unit_tests {
                 prog_body,
             } = elf::elf_loader(&path_prefix.join(prog_name));
 
-            let mem_1 = SimpleMem::new(prog_body.clone());
-            let mem_2 = SimpleMem::new(prog_body);
-            let mut cpu = PipelineProcessor::new(entry_pc, mem_1, mem_2);
+            let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
+            let mut cpu = PipelineProcessor::new(entry_pc, &mem);
 
+            let mut cycle = 0usize;
             while cpu.halt == false {
                 cpu.tick();
+                mem.borrow_mut().tick();
+                cycle += 1;
             }
+            println!("Total cycle: {}", cycle);
         }
     }
 }
