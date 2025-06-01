@@ -1068,7 +1068,7 @@ mod unit_tests {
 
     #[test]
     fn general_programs() {
-        let general_prog_names: Vec<&str> = vec!["hello, print_nums"];
+        let general_prog_names: Vec<&str> = vec!["hello", "print_nums", "msort", "qsort", "matmul"];
         let path_prefix = Path::new("../target/riscv32im-unknown-none-elf/debug");
         for prog_name in general_prog_names {
             let elf::ProgramInfo {

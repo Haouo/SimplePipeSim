@@ -2,37 +2,78 @@
 #![no_main]
 
 extern crate alloc;
+use alloc::vec;
 use alloc::vec::Vec;
+use core::fmt::Write;
 
-use rt;
+use runtime;
+use runtime::basic_io::Stdout;
 
-pub fn quick_sort(slice: &Vec<i32>, low: usize, high: usize) {
+fn quick_sort<T>(vec: &mut Vec<T>)
+where
+    T: Ord + Clone,
+{
+    if vec.len() <= 1 {
+        return;
+    }
+    quick_sort_range(vec, 0, vec.len() - 1);
+}
+
+fn quick_sort_range<T>(vec: &mut Vec<T>, low: usize, high: usize)
+where
+    T: Ord + Clone,
+{
     if low < high {
-        let pivot = sub_sort(slice, low, high);
-        if pivot > 0 {
-            quick_sort(slice, low, pivot - 1)
+        let pivot_index = partition(vec, low, high);
+
+        // 遞迴排序左半部分
+        if pivot_index > 0 {
+            quick_sort_range(vec, low, pivot_index - 1);
         }
-        quick_sort(slice, pivot + 1, high);
+
+        // 遞迴排序右半部分
+        if pivot_index < high {
+            quick_sort_range(vec, pivot_index + 1, high);
+        }
     }
 }
 
-pub fn sub_sort(slice: &Vec<i32>, low: usize, high: usize) -> usize {
-    let pivot = high;
-    let mut i = low as isize - 1;
+fn partition<T>(vec: &mut Vec<T>, low: usize, high: usize) -> usize
+where
+    T: Ord + Clone,
+{
+    // 選擇最後一個元素作為 pivot
+    let pivot = vec[high].clone();
+    let mut i = low;
 
     for j in low..high {
-        // println!("J now is: {}", j);
-        if slice[j] < slice[pivot] {
+        if vec[j] <= pivot {
+            vec.swap(i, j);
             i += 1;
-            slice.swap(i as usize, j);
         }
     }
-    slice.swap((i + 1) as usize, pivot);
-    (i + 1) as usize
+
+    vec.swap(i, high);
+    i
 }
 
 #[no_mangle]
 fn main() {
-    let nums: Vec<i32> = vec![-12, 10, 100, 0, 55, -155, 22, 40, 101];
-    quick_sort(&nums, 0, nums.len() - 1);
+    let mut numbers = vec![64, 34, 25, 12, 22, 11, 90];
+    let _ = writeln!(Stdout, "排序前: {:?}", numbers);
+    quick_sort(&mut numbers);
+    let _ = writeln!(Stdout, "排序後: {:?}", numbers);
+
+    let mut words = vec!["banana", "apple", "cherry", "date"];
+    let _ = writeln!(Stdout, "\n排序前: {:?}", words);
+    quick_sort(&mut words);
+    let _ = writeln!(Stdout, "排序後: {:?}", words);
+
+    let mut empty: Vec<i32> = vec![];
+    quick_sort(&mut empty);
+    let _ = writeln!(Stdout, "\n空向量排序後: {:?}", empty);
+
+    let mut single = vec![42];
+    quick_sort(&mut single);
+    let _ = writeln!(Stdout, "單一元素排序後: {:?}", single);
 }
