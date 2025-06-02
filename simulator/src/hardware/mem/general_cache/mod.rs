@@ -8,6 +8,7 @@ use crate::hardware::mem::abstract_mem::*;
 use crate::hardware::mem::simple_mem::SimpleMem;
 use cache_set::GeneralCacheSetUnit;
 use replacement_policy::ReplacementPolicy;
+use statistic::StatisticInfo;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -51,17 +52,15 @@ pub struct GeneralCache<RP: ReplacementPolicy> {
     // backup of the request being handled when the cache is writing-back or allocating
     backup_req: Option<MemoryReqType>,
 
-    // data as hardware performance counter
-    load_count: usize,
-    load_miss_count: usize,
-    store_count: usize,
-    store_miss_count: usize,
+    // statistic information
+    pub hpm: StatisticInfo,
 }
 
 impl<RP: ReplacementPolicy> GeneralCache<RP> {
     // public methods
     /// only constructor for GeneralCache
     pub fn new(
+        name: String,
         total_size_bytes: usize,
         num_associativity: usize,
         bytes_per_block: usize,
@@ -78,10 +77,7 @@ impl<RP: ReplacementPolicy> GeneralCache<RP> {
             mem_ref,
             pending_req: None,
             backup_req: None,
-            load_count: 0,
-            load_miss_count: 0,
-            store_count: 0,
-            store_miss_count: 0,
+            hpm: StatisticInfo::new(name),
         }
     }
 
@@ -124,21 +120,10 @@ impl<RP: ReplacementPolicy> AbstractMemoryInterface for GeneralCache<RP> {
             // and self.pending_req is None
             MainStates::Idle if self.pending_req.is_none() => {
                 self.pending_req = Some(req.clone());
-                match self
-                    .pending_req
-                    .as_ref()
-                    .expect("The match guard ensuare that pending_req should not be Option::None")
-                {
-                    MemoryReqType::Load(_) => {
-                        self.load_count += 1;
-                    }
-                    MemoryReqType::Store(_) => {
-                        self.store_count += 1;
-                    }
-                }
 
-                // **INFO** 1 cycle pre-tick to imitate synchronous access
+                // **INFO** 2 pre-ticks to imitate synchronous access
                 /* --------------------------- */
+                self.tick();
                 self.tick();
                 /* --------------------------- */
 
@@ -179,12 +164,14 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
                                     &read_block[offset..(offset + req.get_len())],
                                 );
                                 load_req.done.set(true);
+                                self.hpm.load(false); // update HPM
                             }
                             MemoryReqType::Store(store_req) => {
                                 read_block[offset..(offset + req.get_len())]
                                     .clone_from_slice(&*store_req.store_data);
                                 self.set[index].write_block(way_index, &read_block);
                                 store_req.done.set(true);
+                                self.hpm.store(false); // update HPM
                             }
                         }
 
@@ -194,13 +181,13 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
 
                     // match arms 2: cache miss
                     Err((need_write_back, evict_way)) => {
-                        // record miss count
+                        // update HPM
                         match req {
                             MemoryReqType::Load(_) => {
-                                self.load_miss_count += 1;
+                                self.hpm.load(true);
                             }
                             MemoryReqType::Store(_) => {
-                                self.store_miss_count += 1;
+                                self.hpm.store(true);
                             }
                         }
 
@@ -345,6 +332,12 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
     }
 }
 
+impl<RP: ReplacementPolicy> std::ops::Drop for GeneralCache<RP> {
+    fn drop(&mut self) {
+        // print!("{}", self.hpm);
+    }
+}
+
 #[cfg(test)]
 mod unit_tests {
     use super::*;
@@ -362,7 +355,8 @@ mod unit_tests {
         }
 
         let mem = Rc::new(RefCell::new(SimpleMem::new(random_init_data)));
-        let cache = GeneralCache::<FifoRP>::new(4096, 4, 32, Rc::clone(&mem));
+        let cache =
+            GeneralCache::<FifoRP>::new("test cache".to_string(), 4096, 4, 32, Rc::clone(&mem));
         (cache, mem)
     }
 

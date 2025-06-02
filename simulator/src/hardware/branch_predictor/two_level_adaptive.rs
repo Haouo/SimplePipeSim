@@ -1,3 +1,4 @@
+#![allow(unused)]
 use super::{BranchPredict, BranchPredictResult};
 
 pub struct Predictor {
@@ -14,7 +15,7 @@ impl BranchPredict for Predictor {
     fn branch_predict(&mut self, current_pc: u32) -> BranchPredictResult {
         todo!();
     }
-    fn mispredict_recovery(&mut self, correct_direction: bool, target_addr: u32) {
+    fn mispredict_recovery(&mut self, correct_direction: bool, pc: u32, target_addr: u32) {
         todo!();
     }
 }

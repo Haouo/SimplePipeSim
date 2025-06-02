@@ -1,13 +1,14 @@
 use crate::riscv::encoding::OpcodeMap;
 use crate::riscv::instruction::Instruction;
 
-use super::branch_predictor::{BranchPredict, BranchPredictResult};
-use super::clock::Clocked;
-use super::mem::abstract_mem::*;
-use super::mem::general_cache::replacement_policy::fifo;
-use super::mem::general_cache::GeneralCache;
-use super::mem::simple_mem::SimpleMem;
-use super::uop::*;
+use super::super::branch_predictor::{BranchPredict, BranchPredictResult};
+use super::super::clock::Clocked;
+use super::super::mem::abstract_mem::*;
+use super::super::mem::general_cache::replacement_policy::fifo;
+use super::super::mem::general_cache::GeneralCache;
+use super::super::mem::simple_mem::SimpleMem;
+use super::super::uop::*;
+use super::statistic::StatisticInfo;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -30,7 +31,7 @@ enum PipelineMemoryFSM {
 /// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor.
 pub struct PipelineProcessor {
     // Halt signal
-    halt: bool,
+    pub halt: bool,
 
     // IF-Stage instruction fetch PC
     if_pc: u32, // composition of PC with its Branch Predict Result
@@ -67,6 +68,9 @@ pub struct PipelineProcessor {
     icache: Box<dyn AbstractMemoryInterface>,
     // l1 data cache
     dcache: Box<dyn AbstractMemoryInterface>,
+
+    // statistic information (also called Hardware Performance Monitor, HPM)
+    pub hpm: StatisticInfo,
 }
 
 impl PipelineProcessor {
@@ -78,7 +82,7 @@ impl PipelineProcessor {
             halt: false,
             if_pc: init_pc,
             if_raw_isnt_buffer: None,
-            branch_predictor: Box::new(super::branch_predictor::dummy::Predictor),
+            branch_predictor: Box::new(super::super::branch_predictor::bimodal::Predictor::new()),
             id_regs: [0; 32],
             id_op: None,
             exe_op: None,
@@ -95,19 +99,22 @@ impl PipelineProcessor {
             int_mul_div_stall_countdown: None,
             // I$ configuration: 4096 bytes in total, 4-way associativity, 32 bytes for each block (implies 32 sets)
             icache: Box::new(GeneralCache::<fifo::FifoRP>::new(
-                4096,
-                8,
+                "L1-I$".to_string(),
+                2048,
+                4,
                 32,
                 Rc::clone(mem_ref),
             )),
             dcache: Box::new(GeneralCache::<fifo::FifoRP>::new(
-                4096,
+                "L1-D$".to_string(),
+                2048,
                 4,
                 32,
                 Rc::clone(mem_ref),
             )),
             // icache: Box::new(mem_1),
             // dcache: Box::new(mem_2),
+            hpm: StatisticInfo::default(),
         }
     }
 
@@ -171,20 +178,8 @@ impl PipelineProcessor {
             }
         }
 
-        let downstream_stalled = self.id_op.is_some()
-            | self.exe_op.is_some()
-            | self.mem_op.is_some()
-            | self.wb_op.is_some();
-
-        // println!(
-        //     "ID {} EXE {} MEM {} WB {}",
-        //     self.id_op.is_some(),
-        //     self.exe_op.is_some(),
-        //     self.mem_op.is_some(),
-        //     self.wb_op.is_some()
-        // );
         // propagate uOp __only when__ downstream __is not__ stalled
-        if downstream_stalled == false {
+        if self.id_op.is_some() == false {
             // small pre-decoding logic for checking control-flow inst.
             let raw_inst = self
                 .if_raw_isnt_buffer
@@ -196,8 +191,9 @@ impl PipelineProcessor {
             let new_inst = Instruction::raw_binary_to_inst(
                 self.if_raw_isnt_buffer
                     .take()
-                    .expect("Fetced data should not be None!"),
+                    .expect("Fetched data should not be None!"),
             );
+            self.hpm.inst_fetch(); // update HPM
 
             // tranfer raw binary data to Instructrion and make PreDecodeMicroOp
             self.id_op = if let OpcodeMap::Branch | OpcodeMap::Jal | OpcodeMap::Jalr = opcode {
@@ -246,7 +242,7 @@ impl PipelineProcessor {
     /// IT can help the latter stages to perform specific operations without complex decoding logic.
     fn pipe_stage_decode(&mut self, additional_stall: bool) {
         // stall current stage if downstream stage are stalled
-        if self.exe_op.is_some() | self.mem_op.is_some() | self.wb_op.is_some() {
+        if self.exe_op.is_some() {
             return;
         }
         // stall if `self.id_op` is not ready (means that ID stage is still waiting for IF stage to produce new uOp)
@@ -403,7 +399,10 @@ impl PipelineProcessor {
                 }
 
                 // We capture illegal instructions in the ID stage and make the program panic.
-                Instruction::Illegal(raw_inst) => panic!("Unknown instruction: {:#08X}", raw_inst),
+                Instruction::Illegal(raw_inst) => panic!(
+                    "Unknown instruction: {:#08X} at PC: {:#x}",
+                    raw_inst, current_op.pc
+                ),
             }
 
             // stage 2 pre-decode for OP and OP-IMM OPCODE types
@@ -484,7 +483,7 @@ impl PipelineProcessor {
         }
 
         // stall EXE stage if downstream is stalled
-        if self.mem_op.is_some() | self.wb_op.is_some() {
+        if self.mem_op.is_some() {
             return;
         }
         // stall EXE stage if ID stage did not complete his job in last cycle
@@ -690,9 +689,14 @@ impl PipelineProcessor {
                 if need_recover {
                     self.branch_recover = true;
                     self.branch_correct_direction = is_taken;
-                    self.branch_destination = current_op.alu_result;
+                    self.branch_destination = if is_taken {
+                        current_op.alu_result
+                    } else {
+                        current_op.pc + 4
+                    };
                     self.branch_flushes = 3;
                 }
+                self.hpm.solve_branch(need_recover);
             }
         }
 
@@ -858,6 +862,7 @@ impl PipelineProcessor {
                     current_op.rd_write_value.unwrap();
             }
         }
+        self.hpm.inst_ret(); // update HPM
     }
 
     /// Try to solve RAW hazards before the start of a new cycle by using data forwarding
@@ -912,6 +917,14 @@ impl PipelineProcessor {
             .is_some_and(|x| x.is_mem && (!x.is_store))
         {
             if self.id_op.is_some() {
+                println!("detect load-use");
+                println!("ID PC: {:#x}", self.id_op.as_ref().unwrap().pc);
+                println!(
+                    "ID rs1: {}, ID rs2: {}, LOAD rd: {}",
+                    self.id_op.as_ref().unwrap().rs1.or(Some((0, 0))).unwrap().0,
+                    self.id_op.as_ref().unwrap().rs2.or(Some((0, 0))).unwrap().0,
+                    self.exe_op.as_ref().unwrap().rd_index.unwrap()
+                );
                 let exe_rd_index = self
                     .exe_op
                     .as_ref()
@@ -950,8 +963,6 @@ impl Clocked for PipelineProcessor {
     /// We should consider the simulation order of pipeline stage carefully.
     /// The main reason is about data hazard and data forwarding.
     fn tick(&mut self) {
-        // println!("IF PC: {:#X}", self.if_pc);
-
         // handle branch recovery for branch miss-prediction
         if self.branch_recover {
             // revocer correct if_pc and clean fetched inst. or inflight request
@@ -961,23 +972,31 @@ impl Clocked for PipelineProcessor {
 
             // flush pipeline stages
             if self.branch_flushes >= 2 {
+                self.hpm.inst_flush(self.id_op.is_some());
                 self.id_op = None;
             }
             if self.branch_flushes >= 3 {
+                self.hpm.inst_flush(self.exe_op.is_some());
                 self.exe_op = None;
             }
             if self.branch_flushes >= 4 {
+                self.hpm.inst_flush(self.mem_op.is_some());
                 self.mem_op = None;
                 self.mem_fsm = PipelineMemoryFSM::default();
                 self.mem_load_buffer = None;
+                self.mem_access_length_buffer = None;
             }
             if self.branch_flushes >= 5 {
+                self.hpm.inst_flush(self.wb_op.is_some());
                 self.wb_op = None;
             }
 
             // update Branch Predictor
-            self.branch_predictor
-                .mispredict_recovery(self.branch_correct_direction, self.branch_destination);
+            self.branch_predictor.mispredict_recovery(
+                self.branch_correct_direction,
+                self.mem_op.as_ref().unwrap().pc, // the inst. caused control-flow changing in now in MEM stage
+                self.branch_destination,
+            );
 
             // clean self.branch_recover flag
             self.branch_recover = false;
@@ -999,7 +1018,7 @@ impl Clocked for PipelineProcessor {
 
 #[cfg(test)]
 mod unit_tests {
-    use super::super::mem::simple_mem::SimpleMem;
+    use super::super::super::mem::simple_mem::SimpleMem;
     use super::*;
     use crate::sim::elf;
 
@@ -1008,8 +1027,8 @@ mod unit_tests {
     #[test]
     fn riscv_tests() {
         let inst_list: Vec<&str> = vec![
-            "rv32ui-p-lui",
             "rv32ui-p-add",
+            "rv32ui-p-lui",
             "rv32ui-p-sub",
             "rv32ui-p-addi",
             "rv32ui-p-and",
@@ -1100,6 +1119,7 @@ mod unit_tests {
                 cycle += 1;
             }
             println!("Total cycle: {}", cycle);
+            // println!("{}", cpu.hpm);
         }
     }
 }

@@ -5,24 +5,32 @@ pub struct BranchPredictResult {
 }
 
 pub trait BranchPredict {
-    fn branch_predict(&mut self, current_pc: u32) -> BranchPredictResult;
-    fn mispredict_recovery(&mut self, correct_direction: bool, target_addr: u32);
+    fn branch_predict(&mut self, pc: u32) -> BranchPredictResult;
+    fn mispredict_recovery(&mut self, correct_direction: bool, pc: u32, target_addr: u32);
 }
 
 // Dummp Predictor which always predicts branch not-taken
+#[allow(unused)]
 pub mod dummy {
     use super::*;
+
     pub struct Predictor;
+    impl Predictor {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+
     impl BranchPredict for Predictor {
         #[allow(unused)]
-        fn branch_predict(&mut self, current_pc: u32) -> BranchPredictResult {
+        fn branch_predict(&mut self, pc: u32) -> BranchPredictResult {
             BranchPredictResult {
                 direction: false,
                 addr: 0u32,
             }
         }
         #[allow(unused)]
-        fn mispredict_recovery(&mut self, correct_direction: bool, target_addr: u32) {}
+        fn mispredict_recovery(&mut self, correct_direction: bool, pc: u32, target_addr: u32) {}
     }
 }
 

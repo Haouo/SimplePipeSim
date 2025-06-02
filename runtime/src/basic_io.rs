@@ -3,9 +3,9 @@ use core::fmt::Write;
 
 /// only for internal function call
 #[no_mangle]
-fn __internal_syscall(reg_a0: u32, reg_a1: u32) {
+extern "C" fn __internal_syscall(reg_a0: u32, reg_a1: u32) {
     unsafe {
-        asm!("ecall", in("a0") reg_a0, in("a1") reg_a1);
+        asm!("ecall","nop", "nop", "nop", "nop", in("a0") reg_a0, in("a1") reg_a1);
     }
 }
 

@@ -60,20 +60,12 @@ where
 #[no_mangle]
 fn main() {
     let mut numbers = vec![64, 34, 25, 12, 22, 11, 90];
-    let _ = writeln!(Stdout, "排序前: {:?}", numbers);
+    let _ = writeln!(Stdout, "Before: {:?}", numbers);
     quick_sort(&mut numbers);
-    let _ = writeln!(Stdout, "排序後: {:?}", numbers);
+    let _ = writeln!(Stdout, "After: {:?}", numbers);
 
     let mut words = vec!["banana", "apple", "cherry", "date"];
-    let _ = writeln!(Stdout, "\n排序前: {:?}", words);
+    let _ = writeln!(Stdout, "\nBefore: {:?}", words);
     quick_sort(&mut words);
-    let _ = writeln!(Stdout, "排序後: {:?}", words);
-
-    let mut empty: Vec<i32> = vec![];
-    quick_sort(&mut empty);
-    let _ = writeln!(Stdout, "\n空向量排序後: {:?}", empty);
-
-    let mut single = vec![42];
-    quick_sort(&mut single);
-    let _ = writeln!(Stdout, "單一元素排序後: {:?}", single);
+    let _ = writeln!(Stdout, "After: {:?}", words);
 }
