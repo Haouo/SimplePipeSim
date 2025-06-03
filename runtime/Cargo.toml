@@ -22,3 +22,7 @@ path = "bin/msort.rs"
 [[bin]]
 name = "matmul"
 path = "bin/matmul.rs"
+
+[[bin]]
+name = "factorial"
+path = "bin/factorial.rs"
