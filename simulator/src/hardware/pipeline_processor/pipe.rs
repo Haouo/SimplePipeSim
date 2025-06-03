@@ -867,6 +867,14 @@ impl PipelineProcessor {
 
     /// Try to solve RAW hazards before the start of a new cycle by using data forwarding
     fn pipe_data_forwarding(&mut self) -> bool {
+        // ---------- Inportant Note -------- //
+        // The information of rs1 and rs2 of the instruction in ID stage is not present at
+        // the point when this function `pipe_data_forwarding()` is called.
+        //
+        // Hence, it has to extract the rs1 and rs2 information to detect the Load-use hazard
+        // instead of using the `self.id_op.rs1` and `self.id_op.rs2` directly.
+        // ---------------------------------- //
+
         // Check scenario 1: WB -> EXE Forwarding Path (lower priority)
         if let (Some(exe_op), Some(wb_op)) = (&mut self.exe_op, &self.wb_op) {
             // check exe_op.rs1 <---> wb_op.rd
@@ -1119,7 +1127,7 @@ mod unit_tests {
                 cycle += 1;
             }
             println!("Total cycle: {}", cycle);
-            // println!("{}", cpu.hpm);
+            println!("{}", cpu.hpm);
         }
     }
 }
