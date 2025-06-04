@@ -3,9 +3,11 @@ pub mod cache_set; // model for single cache set (might contains multiple ways)
 pub mod replacement_policy; // model for cache replacement policy (e.g., Random, FIFO, LRU)
 pub mod statistic; // utils of statistics for cache
 
+use super::super::statistic::Statistic;
 use crate::hardware::clock::Clocked;
 use crate::hardware::mem::abstract_mem::*;
 use crate::hardware::mem::simple_mem::SimpleMem;
+
 use cache_set::GeneralCacheSetUnit;
 use replacement_policy::ReplacementPolicy;
 use statistic::StatisticInfo;
@@ -332,9 +334,13 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
     }
 }
 
-impl<RP: ReplacementPolicy> std::ops::Drop for GeneralCache<RP> {
-    fn drop(&mut self) {
-        // print!("{}", self.hpm);
+impl<RP: ReplacementPolicy> Statistic for GeneralCache<RP> {
+    fn show_statistic_info(&self) {
+        println!("");
+        println!("=============================================");
+        print!("{}", self.hpm);
+        println!("=============================================");
+        println!("");
     }
 }
 

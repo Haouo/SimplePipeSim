@@ -35,8 +35,6 @@ impl StatisticInfo {
 
 impl Display for StatisticInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "")?;
-        writeln!(f, "=============================================")?;
         writeln!(f, "Statistics Information about {}", self.name)?;
         writeln!(f, "Total load count: {}", self.load_cnt)?;
         writeln!(
@@ -57,8 +55,6 @@ impl Display for StatisticInfo {
                 / (self.load_cnt + self.store_cnt) as f32
                 * 100f32
         )?;
-        writeln!(f, "=============================================")?;
-        writeln!(f, "")?;
         Ok(())
     }
 }

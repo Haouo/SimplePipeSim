@@ -4,9 +4,10 @@ use crate::riscv::instruction::Instruction;
 use super::super::branch_predictor::{BranchPredict, BranchPredictResult};
 use super::super::clock::Clocked;
 use super::super::mem::abstract_mem::*;
-use super::super::mem::general_cache::replacement_policy::fifo;
+use super::super::mem::general_cache::replacement_policy::ReplacementPolicy;
 use super::super::mem::general_cache::GeneralCache;
 use super::super::mem::simple_mem::SimpleMem;
+use super::super::statistic::Statistic;
 use super::super::uop::*;
 use super::statistic::StatisticInfo;
 
@@ -29,7 +30,10 @@ enum PipelineMemoryFSM {
 /// Public struct `PipelineProcessor`
 ///
 /// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor.
-pub struct PipelineProcessor {
+pub struct PipelineProcessor<RP>
+where
+    RP: ReplacementPolicy,
+{
     // Halt signal
     pub halt: bool,
 
@@ -40,6 +44,8 @@ pub struct PipelineProcessor {
 
     // register file (be accessed in ID and WB)
     id_regs: [u32; 32],
+    // additional stall flag
+    id_stall: bool,
 
     // ID, EXE, MEM, WB micro-op
     // If the micro-op is Option::None, it means that
@@ -65,15 +71,20 @@ pub struct PipelineProcessor {
     int_mul_div_stall_countdown: Option<usize>,
 
     // L1 Instruction Cache
-    icache: Box<dyn AbstractMemoryInterface>,
+    // icache: Box<dyn AbstractMemoryInterface>,
+    icache: GeneralCache<RP>,
     // l1 data cache
-    dcache: Box<dyn AbstractMemoryInterface>,
+    // dcache: Box<dyn AbstractMemoryInterface>,
+    dcache: GeneralCache<RP>,
 
     // statistic information (also called Hardware Performance Monitor, HPM)
     pub hpm: StatisticInfo,
 }
 
-impl PipelineProcessor {
+impl<RP> PipelineProcessor<RP>
+where
+    RP: ReplacementPolicy,
+{
     /// The constructor of PipeState struct.
     ///
     /// This function also have the responsibility for initialization the object.
@@ -84,6 +95,7 @@ impl PipelineProcessor {
             if_raw_isnt_buffer: None,
             branch_predictor: Box::new(super::super::branch_predictor::bimodal::Predictor::new()),
             id_regs: [0; 32],
+            id_stall: false,
             id_op: None,
             exe_op: None,
             mem_op: None,
@@ -98,22 +110,8 @@ impl PipelineProcessor {
             branch_flushes: 0,
             int_mul_div_stall_countdown: None,
             // I$ configuration: 4096 bytes in total, 4-way associativity, 32 bytes for each block (implies 32 sets)
-            icache: Box::new(GeneralCache::<fifo::FifoRP>::new(
-                "L1-I$".to_string(),
-                2048,
-                4,
-                32,
-                Rc::clone(mem_ref),
-            )),
-            dcache: Box::new(GeneralCache::<fifo::FifoRP>::new(
-                "L1-D$".to_string(),
-                2048,
-                4,
-                32,
-                Rc::clone(mem_ref),
-            )),
-            // icache: Box::new(mem_1),
-            // dcache: Box::new(mem_2),
+            icache: GeneralCache::<RP>::new("L1-I$".to_string(), 2048, 4, 32, Rc::clone(mem_ref)),
+            dcache: GeneralCache::<RP>::new("L1-D$".to_string(), 2048, 4, 32, Rc::clone(mem_ref)),
             hpm: StatisticInfo::default(),
         }
     }
@@ -579,7 +577,6 @@ impl PipelineProcessor {
                     self.int_mul_div_stall_countdown = None;
                 }
                 AluOpTypes::Div => {
-                    let mut a = 0i64;
                     current_op.alu_result = if op2 != 0 {
                         (((op1 as i32) as i64) / ((op2 as i32) as i64)) as u32
                     } else {
@@ -965,7 +962,10 @@ impl PipelineProcessor {
     }
 }
 
-impl Clocked for PipelineProcessor {
+impl<RP> Clocked for PipelineProcessor<RP>
+where
+    RP: ReplacementPolicy,
+{
     /// ### tick() function to simulate clock-edge trigger
     ///
     /// We should consider the simulation order of pipeline stage carefully.
@@ -1011,12 +1011,20 @@ impl Clocked for PipelineProcessor {
         }
 
         // start new simulation cycle
-        let stall_load_use_hazard = self.pipe_data_forwarding();
         self.pipe_stage_wb();
         self.pipe_stage_mem();
         self.pipe_stage_exe();
-        self.pipe_stage_decode(stall_load_use_hazard);
+        self.pipe_stage_decode(self.id_stall);
+        self.id_stall = self.pipe_data_forwarding();
         self.pipe_stage_fetch();
+        // insert additional NOP instruction at EXE stage to prevent from
+        // the instruction at ID stage propagating to EXE stage
+        //
+        // Inserting NOP makes the self.exe_op to be Some(...) instead of None
+        if self.id_stall {
+            // @TODO
+            // self.exe_op = nop...
+        }
 
         // tick L1-I$ and L1-D$
         self.icache.tick();
@@ -1024,10 +1032,28 @@ impl Clocked for PipelineProcessor {
     }
 }
 
+impl<RP> Statistic for PipelineProcessor<RP>
+where
+    RP: ReplacementPolicy,
+{
+    fn show_statistic_info(&self) {
+        // info of two caches
+        self.icache.show_statistic_info();
+        self.dcache.show_statistic_info();
+        // info of the CPU itself
+        println!("");
+        println!("=============================================");
+        print!("{}", self.hpm);
+        println!("=============================================");
+        println!("");
+    }
+}
+
 #[cfg(test)]
 mod unit_tests {
-    use super::super::super::mem::simple_mem::SimpleMem;
     use super::*;
+    use crate::hardware::mem::general_cache::replacement_policy as rp;
+    use crate::hardware::mem::simple_mem::SimpleMem;
     use crate::sim::elf;
 
     use std::path::Path;
@@ -1089,7 +1115,7 @@ mod unit_tests {
                 prog_body,
             } = elf::elf_loader(&path);
             let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
-            let mut cpu = PipelineProcessor::new(entry_pc, &mem);
+            let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(entry_pc, &mem);
 
             while cpu.halt == false {
                 cpu.tick();
@@ -1107,7 +1133,7 @@ mod unit_tests {
         }
     }
 
-    // #[test]
+    #[test]
     fn general_programs() {
         let general_prog_names: Vec<&str> = vec!["hello", "print_nums", "msort", "qsort", "matmul"];
         let path_prefix = Path::new("../target/riscv32im-unknown-none-elf/debug");
@@ -1118,7 +1144,7 @@ mod unit_tests {
             } = elf::elf_loader(&path_prefix.join(prog_name));
 
             let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
-            let mut cpu = PipelineProcessor::new(entry_pc, &mem);
+            let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(entry_pc, &mem);
 
             let mut cycle = 0usize;
             while cpu.halt == false {
@@ -1127,7 +1153,6 @@ mod unit_tests {
                 cycle += 1;
             }
             println!("Total cycle: {}", cycle);
-            println!("{}", cpu.hpm);
         }
     }
 }
