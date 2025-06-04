@@ -1,5 +1,6 @@
 #[derive(Default)]
 pub struct StatisticInfo {
+    total_ticked_cycle: usize,
     inst_fetched: usize,
     inst_retire: usize,
     branch_inst_cnt: usize,
@@ -9,6 +10,10 @@ pub struct StatisticInfo {
 }
 
 impl StatisticInfo {
+    pub fn tick(&mut self) {
+        self.total_ticked_cycle += 1;
+    }
+
     pub fn inst_fetch(&mut self) {
         self.inst_fetched += 1;
     }
@@ -37,6 +42,7 @@ impl std::fmt::Display for StatisticInfo {
         writeln!(f, "")?;
         writeln!(f, "=============================================")?;
         writeln!(f, "Statistics Information about PipelineProcessor")?;
+        writeln!(f, "Total ticked cycle count: {}", self.total_ticked_cycle)?;
         writeln!(f, "Total instruction fetched: {}", self.inst_fetched)?;
         writeln!(f, "Total instruction retired: {}", self.inst_retire)?;
         writeln!(
@@ -46,7 +52,7 @@ impl std::fmt::Display for StatisticInfo {
         )?;
         writeln!(
             f,
-            "Total branch miss rate: {:.2}",
+            "Total branch miss rate: {:.2}%",
             (self.branch_miss_cnt as f64) / (self.branch_inst_cnt as f64)
         )?;
         writeln!(f, "Total flush count: {}", self.total_flush_cnt)?;

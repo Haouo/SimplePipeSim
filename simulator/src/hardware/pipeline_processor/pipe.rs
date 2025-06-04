@@ -44,8 +44,6 @@ where
 
     // register file (be accessed in ID and WB)
     id_regs: [u32; 32],
-    // additional stall flag
-    id_stall: bool,
 
     // ID, EXE, MEM, WB micro-op
     // If the micro-op is Option::None, it means that
@@ -95,7 +93,6 @@ where
             if_raw_isnt_buffer: None,
             branch_predictor: Box::new(super::super::branch_predictor::bimodal::Predictor::new()),
             id_regs: [0; 32],
-            id_stall: false,
             id_op: None,
             exe_op: None,
             mem_op: None,
@@ -110,8 +107,8 @@ where
             branch_flushes: 0,
             int_mul_div_stall_countdown: None,
             // I$ configuration: 4096 bytes in total, 4-way associativity, 32 bytes for each block (implies 32 sets)
-            icache: GeneralCache::<RP>::new("L1-I$".to_string(), 2048, 4, 32, Rc::clone(mem_ref)),
-            dcache: GeneralCache::<RP>::new("L1-D$".to_string(), 2048, 4, 32, Rc::clone(mem_ref)),
+            icache: GeneralCache::<RP>::new("L1-I$".to_string(), 1024, 4, 16, Rc::clone(mem_ref)),
+            dcache: GeneralCache::<RP>::new("L1-D$".to_string(), 1024, 2, 16, Rc::clone(mem_ref)),
             hpm: StatisticInfo::default(),
         }
     }
@@ -186,11 +183,11 @@ where
                 .try_into()
                 .or(Result::<OpcodeMap, ()>::Ok(OpcodeMap::Op)) // dummy value for unknown OPCODE
                 .unwrap();
-            let new_inst = Instruction::raw_binary_to_inst(
-                self.if_raw_isnt_buffer
-                    .take()
-                    .expect("Fetched data should not be None!"),
-            );
+            let new_raw_inst = self
+                .if_raw_isnt_buffer
+                .take()
+                .expect("Getched data in if_raw_inst_buffer should not be None!");
+            let new_inst = Instruction::raw_binary_to_inst(new_raw_inst);
             self.hpm.inst_fetch(); // update HPM
 
             // tranfer raw binary data to Instructrion and make PreDecodeMicroOp
@@ -209,6 +206,7 @@ where
 
                 // make new uOp to ID
                 Some(PreDecodeMicroOp {
+                    raw_inst: new_raw_inst,
                     inst: new_inst,
                     pc: old_pc,
                     is_branch: true,
@@ -222,6 +220,7 @@ where
 
                 // make new uOp to ID
                 Some(PreDecodeMicroOp {
+                    raw_inst: new_raw_inst,
                     inst: new_inst,
                     pc: old_pc,
                     is_branch: false,
@@ -859,11 +858,13 @@ where
                     current_op.rd_write_value.unwrap();
             }
         }
-        self.hpm.inst_ret(); // update HPM
+        if current_op.placeholder == false {
+            self.hpm.inst_ret(); // update HPM
+        }
     }
 
     /// Try to solve RAW hazards before the start of a new cycle by using data forwarding
-    fn pipe_data_forwarding(&mut self) -> bool {
+    fn pipe_normal_data_hazard_resolve(&mut self) {
         // ---------- Inportant Note -------- //
         // The information of rs1 and rs2 of the instruction in ID stage is not present at
         // the point when this function `pipe_data_forwarding()` is called.
@@ -913,48 +914,35 @@ where
                 }
             }
         }
+    }
 
-        // check Load-Use Data Hazard
-        // firstly, check inst. at MEM stage is a load inst.
-        if self
-            .exe_op
-            .as_ref()
-            .is_some_and(|x| x.is_mem && (!x.is_store))
-        {
-            if self.id_op.is_some() {
-                println!("detect load-use");
-                println!("ID PC: {:#x}", self.id_op.as_ref().unwrap().pc);
-                println!(
-                    "ID rs1: {}, ID rs2: {}, LOAD rd: {}",
-                    self.id_op.as_ref().unwrap().rs1.or(Some((0, 0))).unwrap().0,
-                    self.id_op.as_ref().unwrap().rs2.or(Some((0, 0))).unwrap().0,
-                    self.exe_op.as_ref().unwrap().rd_index.unwrap()
-                );
-                let exe_rd_index = self
-                    .exe_op
-                    .as_ref()
-                    .unwrap()
-                    .rd_index
-                    .expect("Load instruction without rd index makes no sense.");
-                // if ID rs1 and Load inst. at EXE rd is overlap
-                if self
-                    .id_op
-                    .as_ref()
-                    .unwrap()
-                    .rs1
-                    .is_some_and(|x| x.0 == exe_rd_index)
-                {
-                    return true;
-                }
-                // if ID rs2 and Load inst. at EXE rd is overlap
-                if self
-                    .id_op
-                    .as_ref()
-                    .unwrap()
-                    .rs2
-                    .is_some_and(|x| x.0 == exe_rd_index)
-                {
-                    return true;
+    fn pipe_load_use_hazard_handle(&mut self) -> bool {
+        // Checks whether the original instruction at EXE stage has moved to MEM stage
+        if let (Some(id_op), None, Some(as_exe_op)) = (&self.id_op, &self.exe_op, &self.mem_op) {
+            // check the original EXE instruction is LOAD
+            if as_exe_op.is_mem && !as_exe_op.is_store && as_exe_op.rd_index.is_some_and(|x| x != 0)
+            {
+                let id_opcode: OpcodeMap = ((id_op.raw_inst & 0x7f) as u8)
+                    .try_into()
+                    .expect("Illegal OPCODE!");
+                match id_opcode {
+                    // these 5 types do not use rs1 and rs2 source registers
+                    OpcodeMap::Jal
+                    | OpcodeMap::Lui
+                    | OpcodeMap::Auipc
+                    | OpcodeMap::MiscMem
+                    | OpcodeMap::System => {}
+                    // other types use rs1 and rs2
+                    _ => {
+                        let id_rs1 = ((id_op.raw_inst >> 15) & 0x1f) as u8;
+                        let id_rs2 = ((id_op.raw_inst >> 20) & 0x1f) as u8;
+                        if id_rs1 != 0 && id_rs1 == as_exe_op.rd_index.unwrap() {
+                            return true;
+                        }
+                        if id_rs2 != 0 && id_rs2 == as_exe_op.rd_index.unwrap() {
+                            return true;
+                        }
+                    }
                 }
             }
         }
@@ -971,6 +959,16 @@ where
     /// We should consider the simulation order of pipeline stage carefully.
     /// The main reason is about data hazard and data forwarding.
     fn tick(&mut self) {
+        self.hpm.tick();
+        // println!("IF PC: {:#x}", self.if_pc);
+        // println!(
+        //     "IF | {} | {} | {} | {}",
+        //     self.id_op.is_some(),
+        //     self.exe_op.is_some(),
+        //     self.mem_op.is_some(),
+        //     self.wb_op.is_some()
+        // );
+
         // handle branch recovery for branch miss-prediction
         if self.branch_recover {
             // revocer correct if_pc and clean fetched inst. or inflight request
@@ -1011,19 +1009,21 @@ where
         }
 
         // start new simulation cycle
+        self.pipe_normal_data_hazard_resolve();
         self.pipe_stage_wb();
         self.pipe_stage_mem();
         self.pipe_stage_exe();
-        self.pipe_stage_decode(self.id_stall);
-        self.id_stall = self.pipe_data_forwarding();
+        let id_load_use_stall = self.pipe_load_use_hazard_handle();
+        self.pipe_stage_decode(id_load_use_stall);
         self.pipe_stage_fetch();
         // insert additional NOP instruction at EXE stage to prevent from
         // the instruction at ID stage propagating to EXE stage
         //
         // Inserting NOP makes the self.exe_op to be Some(...) instead of None
-        if self.id_stall {
-            // @TODO
-            // self.exe_op = nop...
+        if id_load_use_stall {
+            assert!(self.exe_op.is_none());
+            self.exe_op = Some(PreDecodeMicroOp::generate_nop());
+            self.exe_op.as_mut().unwrap().placeholder = true;
         }
 
         // tick L1-I$ and L1-D$
@@ -1130,6 +1130,7 @@ mod unit_tests {
                 (cpu.id_regs[3] - 1) / 2
             );
             println!("Pass the test: {}", inst_name);
+            cpu.show_statistic_info();
         }
     }
 
@@ -1146,13 +1147,11 @@ mod unit_tests {
             let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
             let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(entry_pc, &mem);
 
-            let mut cycle = 0usize;
             while cpu.halt == false {
                 cpu.tick();
                 mem.borrow_mut().tick();
-                cycle += 1;
             }
-            println!("Total cycle: {}", cycle);
+            cpu.show_statistic_info();
         }
     }
 }

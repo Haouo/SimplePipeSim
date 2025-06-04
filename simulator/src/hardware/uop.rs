@@ -1,4 +1,5 @@
 use super::branch_predictor::BranchPredictResult;
+use crate::riscv::format_types::IType;
 use crate::riscv::instruction::Instruction;
 
 #[derive(Default)]
@@ -42,6 +43,7 @@ pub enum AluOpTwoSelect {
 #[derive(Default)]
 pub struct PreDecodeMicroOp {
     // basic info
+    pub raw_inst: u32,     // generated in IF
     pub inst: Instruction, // generated in IF
     pub pc: u32,           // generated in IF
 
@@ -72,4 +74,22 @@ pub struct PreDecodeMicroOp {
 
     // is environment call
     pub is_env_call: bool, // generated in ID
+
+    // special flag: placeholder
+    // The current uOp should be viewed as a normal instruction (NOP), which means that
+    // it can take place of some pipeline stage and preventing from propagating of the instruction at the previous stage,
+    // while the uOp with placeholder flags being true should not be counted into retired instructions.
+    pub placeholder: bool,
+}
+
+impl PreDecodeMicroOp {
+    pub fn generate_nop() -> Self {
+        Self {
+            pc: 0xffffffffu32,
+            inst: Instruction::Addi(IType(0x00000013u32)),
+            rs1: Some((0, 0)),
+            rs2: Some((0, 0)),
+            ..Default::default()
+        }
+    }
 }
