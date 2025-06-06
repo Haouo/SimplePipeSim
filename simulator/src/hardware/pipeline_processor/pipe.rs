@@ -107,8 +107,8 @@ where
             branch_flushes: 0,
             int_mul_div_stall_countdown: None,
             // I$ configuration: 4096 bytes in total, 4-way associativity, 32 bytes for each block (implies 32 sets)
-            icache: GeneralCache::<RP>::new("L1-I$".to_string(), 1024, 4, 16, Rc::clone(mem_ref)),
-            dcache: GeneralCache::<RP>::new("L1-D$".to_string(), 1024, 2, 16, Rc::clone(mem_ref)),
+            icache: GeneralCache::<RP>::new("L1-I$".to_string(), 4096, 4, 16, Rc::clone(mem_ref)),
+            dcache: GeneralCache::<RP>::new("L1-D$".to_string(), 4096, 4, 16, Rc::clone(mem_ref)),
             hpm: StatisticInfo::default(),
         }
     }
@@ -1041,11 +1041,10 @@ where
         self.icache.show_statistic_info();
         self.dcache.show_statistic_info();
         // info of the CPU itself
-        println!("");
         println!("=============================================");
         print!("{}", self.hpm);
         println!("=============================================");
-        println!("");
+        println!();
     }
 }
 

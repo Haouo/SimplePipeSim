@@ -39,12 +39,15 @@ impl StatisticInfo {
 
 impl std::fmt::Display for StatisticInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "")?;
-        writeln!(f, "=============================================")?;
         writeln!(f, "Statistics Information about PipelineProcessor")?;
         writeln!(f, "Total ticked cycle count: {}", self.total_ticked_cycle)?;
         writeln!(f, "Total instruction fetched: {}", self.inst_fetched)?;
         writeln!(f, "Total instruction retired: {}", self.inst_retire)?;
+        writeln!(
+            f,
+            "Instruction-Per-Cycle (IPC): {:.3}",
+            self.inst_retire as f64 / self.total_ticked_cycle as f64
+        )?;
         writeln!(
             f,
             "Total control-flow instruction count: {}",
@@ -53,7 +56,7 @@ impl std::fmt::Display for StatisticInfo {
         writeln!(
             f,
             "Total branch miss rate: {:.2}%",
-            (self.branch_miss_cnt as f64) / (self.branch_inst_cnt as f64)
+            (self.branch_miss_cnt as f64) / (self.branch_inst_cnt as f64) * 100f64
         )?;
         writeln!(f, "Total flush count: {}", self.total_flush_cnt)?;
         writeln!(
@@ -61,8 +64,6 @@ impl std::fmt::Display for StatisticInfo {
             "Actual flushed instruction count: {}",
             self.actual_flushed_inst_cnt
         )?;
-        writeln!(f, "=============================================")?;
-        writeln!(f, "")?;
         Ok(())
     }
 }

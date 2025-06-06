@@ -16,7 +16,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 // constants
-const CACHE_MISS_ADDITIONAL_PENALTY: usize = 10;
+const CACHE_MISS_ADDITIONAL_PENALTY: usize = 1;
 
 /// States for Main FSM to control the overall actions of the GeneralCache.
 enum MainStates {
@@ -336,11 +336,9 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
 
 impl<RP: ReplacementPolicy> Statistic for GeneralCache<RP> {
     fn show_statistic_info(&self) {
-        println!("");
         println!("=============================================");
         print!("{}", self.hpm);
         println!("=============================================");
-        println!("");
     }
 }
 
