@@ -9,7 +9,8 @@ use super::super::mem::general_cache::GeneralCache;
 use super::super::mem::simple_mem::SimpleMem;
 use super::super::statistic::Statistic;
 use super::super::uop::*;
-use super::statistic::StatisticInfo;
+use super::statistic;
+use crate::hardware::mem::general_cache::GeneralCacheConfig;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -70,13 +71,13 @@ where
 
     // L1 Instruction Cache
     // icache: Box<dyn AbstractMemoryInterface>,
-    icache: GeneralCache<RP>,
+    pub icache: GeneralCache<RP>,
     // l1 data cache
     // dcache: Box<dyn AbstractMemoryInterface>,
-    dcache: GeneralCache<RP>,
+    pub dcache: GeneralCache<RP>,
 
     // statistic information (also called Hardware Performance Monitor, HPM)
-    pub hpm: StatisticInfo,
+    pub hpm: statistic::StatisticInfo,
 }
 
 impl<RP> PipelineProcessor<RP>
@@ -86,7 +87,12 @@ where
     /// The constructor of PipeState struct.
     ///
     /// This function also have the responsibility for initialization the object.
-    pub fn new(init_pc: u32, mem_ref: &Rc<RefCell<SimpleMem>>) -> Self {
+    pub fn new(
+        init_pc: u32,
+        l1i_cache_config: GeneralCacheConfig,
+        l1d_cache_config: GeneralCacheConfig,
+        mem_ref: &Rc<RefCell<SimpleMem>>,
+    ) -> Self {
         PipelineProcessor {
             halt: false,
             if_pc: init_pc,
@@ -107,9 +113,9 @@ where
             branch_flushes: 0,
             int_mul_div_stall_countdown: None,
             // I$ configuration: 4096 bytes in total, 4-way associativity, 32 bytes for each block (implies 32 sets)
-            icache: GeneralCache::<RP>::new("L1-I$".to_string(), 4096, 4, 16, Rc::clone(mem_ref)),
-            dcache: GeneralCache::<RP>::new("L1-D$".to_string(), 4096, 4, 16, Rc::clone(mem_ref)),
-            hpm: StatisticInfo::default(),
+            icache: GeneralCache::<RP>::new(l1i_cache_config, Rc::clone(mem_ref)),
+            dcache: GeneralCache::<RP>::new(l1d_cache_config, Rc::clone(mem_ref)),
+            hpm: statistic::StatisticInfo::default(),
         }
     }
 
@@ -846,7 +852,7 @@ where
             if reg_a0 == 0 {
                 self.halt = true; // ends the simulation
             } else if reg_a0 == 1 {
-                print!("{}", char::from_u32(reg_a1 & 0xff).unwrap()); // print a character which is stored in $a1
+                // print!("{}", char::from_u32(reg_a1 & 0xff).unwrap()); // print a character which is stored in $a1
             }
         }
 
@@ -1036,15 +1042,14 @@ impl<RP> Statistic for PipelineProcessor<RP>
 where
     RP: ReplacementPolicy,
 {
-    fn show_statistic_info(&self) {
-        // info of two caches
-        self.icache.show_statistic_info();
-        self.dcache.show_statistic_info();
-        // info of the CPU itself
-        println!("=============================================");
-        print!("{}", self.hpm);
-        println!("=============================================");
-        println!();
+    type StatisticInfo = statistic::StatisticInfo;
+    fn get_statistic_info(&self) -> Self::StatisticInfo {
+        // calculate parts of statistics info.
+        let mut ret = self.hpm.clone();
+        ret.ipc = ret.inst_retire as f64 / ret.total_ticked_cycle as f64;
+        ret.branch_miss_rate = ret.branch_miss_cnt as f64 / ret.branch_inst_cnt as f64;
+        // return
+        ret
     }
 }
 
@@ -1114,7 +1119,20 @@ mod unit_tests {
                 prog_body,
             } = elf::elf_loader(&path);
             let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
-            let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(entry_pc, &mem);
+            let l1i_cache_config = GeneralCacheConfig::new("L1-I$".to_string())
+                .with_total_size(4096)
+                .with_block_size(32)
+                .with_num_of_way(4);
+            let l1d_cache_config = GeneralCacheConfig::new("L1-I$".to_string())
+                .with_total_size(4096)
+                .with_block_size(32)
+                .with_num_of_way(4);
+            let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(
+                entry_pc,
+                l1i_cache_config,
+                l1d_cache_config,
+                &mem,
+            );
 
             while cpu.halt == false {
                 cpu.tick();
@@ -1129,7 +1147,7 @@ mod unit_tests {
                 (cpu.id_regs[3] - 1) / 2
             );
             println!("Pass the test: {}", inst_name);
-            cpu.show_statistic_info();
+            // cpu.show_statistic_info();
         }
     }
 
@@ -1144,13 +1162,25 @@ mod unit_tests {
             } = elf::elf_loader(&path_prefix.join(prog_name));
 
             let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
-            let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(entry_pc, &mem);
+            let l1i_cache_config = GeneralCacheConfig::new("L1-I$".to_string())
+                .with_total_size(4096)
+                .with_block_size(32)
+                .with_num_of_way(4);
+            let l1d_cache_config = GeneralCacheConfig::new("L1-I$".to_string())
+                .with_total_size(4096)
+                .with_block_size(32)
+                .with_num_of_way(4);
+            let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(
+                entry_pc,
+                l1i_cache_config,
+                l1d_cache_config,
+                &mem,
+            );
 
             while cpu.halt == false {
                 cpu.tick();
                 mem.borrow_mut().tick();
             }
-            cpu.show_statistic_info();
         }
     }
 }

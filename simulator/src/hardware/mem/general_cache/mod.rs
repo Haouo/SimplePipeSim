@@ -16,7 +16,51 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 // constants
-const CACHE_MISS_ADDITIONAL_PENALTY: usize = 1;
+const CACHE_MISS_ADDITIONAL_PENALTY: usize = 5;
+
+// a special struct data type for cache configuring
+#[derive(Default, Clone)]
+pub struct GeneralCacheConfig {
+    name: String,
+    total_size: Option<usize>,
+    block_size: Option<usize>,
+    num_of_way: Option<usize>,
+}
+
+impl GeneralCacheConfig {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_total_size(&self, size_in_bytes: usize) -> Self {
+        let mut new_self = self.clone();
+        new_self.total_size = Some(size_in_bytes);
+        new_self
+    }
+
+    pub fn with_block_size(&self, size_in_bytes: usize) -> Self {
+        assert!(
+            self.total_size != None,
+            "You have to configure total size first befor configuring block size!"
+        );
+        let mut new_self = self.clone();
+        new_self.block_size = Some(size_in_bytes);
+        new_self
+    }
+
+    pub fn with_num_of_way(&self, ways: usize) -> Self {
+        assert!(
+            self.block_size != None,
+            "You have to configure block size before configuring number of ways!"
+        );
+        let mut new_self = self.clone();
+        new_self.num_of_way = Some(ways);
+        new_self
+    }
+}
 
 /// States for Main FSM to control the overall actions of the GeneralCache.
 enum MainStates {
@@ -61,25 +105,25 @@ pub struct GeneralCache<RP: ReplacementPolicy> {
 impl<RP: ReplacementPolicy> GeneralCache<RP> {
     // public methods
     /// only constructor for GeneralCache
-    pub fn new(
-        name: String,
-        total_size_bytes: usize,
-        num_associativity: usize,
-        bytes_per_block: usize,
-        mem_ref: Rc<RefCell<SimpleMem>>,
-    ) -> Self {
-        let num_set = total_size_bytes / (bytes_per_block * num_associativity);
+    pub fn new(config: GeneralCacheConfig, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
+        let num_set =
+            config.total_size.unwrap() / (config.block_size.unwrap() * config.num_of_way.unwrap());
         GeneralCache {
-            offset_bit_width: bytes_per_block.ilog2() as usize,
+            offset_bit_width: config.block_size.unwrap().ilog2() as usize,
             index_bit_width: num_set.ilog2() as usize,
             set: (0..num_set)
-                .map(|_| GeneralCacheSetUnit::<RP>::new(num_associativity, bytes_per_block))
+                .map(|_| {
+                    GeneralCacheSetUnit::<RP>::new(
+                        config.num_of_way.unwrap(),
+                        config.block_size.unwrap(),
+                    )
+                })
                 .collect(),
             fsm: MainStates::Idle,
             mem_ref,
             pending_req: None,
             backup_req: None,
-            hpm: StatisticInfo::new(name),
+            hpm: StatisticInfo::new(config.name),
         }
     }
 
@@ -334,11 +378,19 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
     }
 }
 
-impl<RP: ReplacementPolicy> Statistic for GeneralCache<RP> {
-    fn show_statistic_info(&self) {
-        println!("=============================================");
-        print!("{}", self.hpm);
-        println!("=============================================");
+impl<RP> Statistic for GeneralCache<RP>
+where
+    RP: ReplacementPolicy,
+{
+    type StatisticInfo = statistic::StatisticInfo;
+    fn get_statistic_info(&self) -> Self::StatisticInfo {
+        // calculate parts of statistics info.
+        let mut ret = self.hpm.clone();
+        ret.load_miss_rate = ret.load_miss_cnt as f64 / (ret.load_cnt + ret.store_cnt) as f64;
+        ret.store_miss_rate = ret.store_miss_cnt as f64 / (ret.load_cnt + ret.store_cnt) as f64;
+        ret.overall_miss_rate = ret.load_miss_rate + ret.store_miss_rate;
+        // return
+        ret
     }
 }
 
@@ -359,8 +411,11 @@ mod unit_tests {
         }
 
         let mem = Rc::new(RefCell::new(SimpleMem::new(random_init_data)));
-        let cache =
-            GeneralCache::<FifoRP>::new("test cache".to_string(), 4096, 4, 32, Rc::clone(&mem));
+        let cache_config = GeneralCacheConfig::new("test_cache".to_string())
+            .with_total_size(4096)
+            .with_block_size(32)
+            .with_num_of_way(2);
+        let cache = GeneralCache::<FifoRP>::new(cache_config, Rc::clone(&mem));
         (cache, mem)
     }
 

@@ -1,12 +1,16 @@
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct StatisticInfo {
-    total_ticked_cycle: usize,
-    inst_fetched: usize,
-    inst_retire: usize,
-    branch_inst_cnt: usize,
-    branch_miss_cnt: usize,
-    total_flush_cnt: usize,
-    actual_flushed_inst_cnt: usize,
+    // be recorded during runtime
+    pub total_ticked_cycle: usize,
+    pub inst_fetched: usize,
+    pub inst_retire: usize,
+    pub branch_inst_cnt: usize,
+    pub branch_miss_cnt: usize,
+    pub total_flush_cnt: usize,
+    pub actual_flushed_inst_cnt: usize,
+    // be calculated after ending of simulation
+    pub ipc: f64,
+    pub branch_miss_rate: f64,
 }
 
 impl StatisticInfo {
@@ -34,36 +38,5 @@ impl StatisticInfo {
         if valid {
             self.actual_flushed_inst_cnt += 1;
         }
-    }
-}
-
-impl std::fmt::Display for StatisticInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Statistics Information about PipelineProcessor")?;
-        writeln!(f, "Total ticked cycle count: {}", self.total_ticked_cycle)?;
-        writeln!(f, "Total instruction fetched: {}", self.inst_fetched)?;
-        writeln!(f, "Total instruction retired: {}", self.inst_retire)?;
-        writeln!(
-            f,
-            "Instruction-Per-Cycle (IPC): {:.3}",
-            self.inst_retire as f64 / self.total_ticked_cycle as f64
-        )?;
-        writeln!(
-            f,
-            "Total control-flow instruction count: {}",
-            self.branch_inst_cnt
-        )?;
-        writeln!(
-            f,
-            "Total branch miss rate: {:.2}%",
-            (self.branch_miss_cnt as f64) / (self.branch_inst_cnt as f64) * 100f64
-        )?;
-        writeln!(f, "Total flush count: {}", self.total_flush_cnt)?;
-        writeln!(
-            f,
-            "Actual flushed instruction count: {}",
-            self.actual_flushed_inst_cnt
-        )?;
-        Ok(())
     }
 }

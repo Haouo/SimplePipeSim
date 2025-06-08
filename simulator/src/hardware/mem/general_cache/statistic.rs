@@ -1,12 +1,15 @@
-use std::fmt::Display;
-
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct StatisticInfo {
-    name: String,
-    load_cnt: usize,
-    store_cnt: usize,
-    load_miss_cnt: usize,
-    store_miss_cnt: usize,
+    // be recorded during runtime
+    pub name: String,
+    pub load_cnt: usize,
+    pub store_cnt: usize,
+    pub load_miss_cnt: usize,
+    pub store_miss_cnt: usize,
+    // be calculated after ending of simulation
+    pub load_miss_rate: f64,
+    pub store_miss_rate: f64,
+    pub overall_miss_rate: f64,
 }
 
 impl StatisticInfo {
@@ -30,31 +33,5 @@ impl StatisticInfo {
         if is_miss {
             self.store_miss_cnt += 1;
         }
-    }
-}
-
-impl Display for StatisticInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Statistics Information about {}", self.name)?;
-        writeln!(f, "Total load count: {}", self.load_cnt)?;
-        writeln!(
-            f,
-            "Load miss rate: {:.2}%",
-            (self.load_miss_cnt as f32 / self.load_cnt as f32) * 100f32
-        )?;
-        writeln!(f, "Total store count: {}", self.store_cnt)?;
-        writeln!(
-            f,
-            "Store miss rate: {:.2}%",
-            (self.store_miss_cnt as f32 / self.store_cnt as f32) * 100f32
-        )?;
-        writeln!(
-            f,
-            "Overall miss rate: {:.2}%",
-            (self.load_miss_cnt + self.store_miss_cnt) as f32
-                / (self.load_cnt + self.store_cnt) as f32
-                * 100f32
-        )?;
-        Ok(())
     }
 }

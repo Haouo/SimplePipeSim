@@ -1,3 +1,4 @@
 pub trait Statistic {
-    fn show_statistic_info(&self);
+    type StatisticInfo;
+    fn get_statistic_info(&self) -> Self::StatisticInfo;
 }
