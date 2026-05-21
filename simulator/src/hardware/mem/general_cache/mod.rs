@@ -2,6 +2,7 @@
 pub mod cache_set; // model for single cache set (might contains multiple ways)
 pub mod replacement_policy; // model for cache replacement policy (e.g., Random, FIFO, LRU)
 pub mod statistic; // utils of statistics for cache
+pub mod write_policy; // model for cache write policy (WB/WT × WA/NWA)
 
 use super::super::statistic::Statistic;
 use crate::hardware::clock::Clocked;
@@ -9,6 +10,7 @@ use crate::hardware::mem::abstract_mem::*;
 use cache_set::GeneralCacheSetUnit;
 use replacement_policy::ReplacementPolicy;
 use statistic::StatisticInfo;
+use write_policy::WritePolicy;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -29,6 +31,9 @@ pub struct GeneralCacheConfig {
     /// re-access and the pipeline bubble while the refilled block becomes
     /// visible. `None` means "use the default".
     miss_penalty: Option<usize>,
+    /// Write policy. `None` ⇒ `WritePolicy::default()` (write-back +
+    /// write-allocate, the historical behaviour).
+    write_policy: Option<WritePolicy>,
 }
 
 impl GeneralCacheConfig {
@@ -73,6 +78,13 @@ impl GeneralCacheConfig {
     pub fn with_miss_penalty(&self, cycles: usize) -> Self {
         let mut new_self = self.clone();
         new_self.miss_penalty = Some(cycles);
+        new_self
+    }
+
+    /// Set the write policy. Defaults to write-back + write-allocate.
+    pub fn with_write_policy(&self, wp: WritePolicy) -> Self {
+        let mut new_self = self.clone();
+        new_self.write_policy = Some(wp);
         new_self
     }
 }
@@ -138,6 +150,16 @@ enum MainStates {
     /// Stall for an additional fixed penalty after a miss completes,
     /// modelling tag-array re-access / pipeline bubble cost.
     AdditionalMissPenalty(usize),
+    /// Used by write-through policies after a store hit: the cache copy
+    /// has already been updated; this state drives the same store to the
+    /// next-level memory. When the next-level store completes we mark
+    /// the original requester's `done` cell and return to Idle.
+    WriteThroughCommit(StatesForOutMemReq, Rc<Cell<bool>>),
+    /// Used by no-write-allocate policies on a store miss: the cache
+    /// stays untouched and the store goes straight to the next level.
+    /// On completion we mark the original requester's `done` and return
+    /// to Idle.
+    WriteAround(StatesForOutMemReq, Rc<Cell<bool>>),
 }
 
 /// States of secondary FSM to handling memory requests to next-level memory.
@@ -170,6 +192,9 @@ pub struct GeneralCache<RP: ReplacementPolicy, M: AbstractMemoryInterface> {
     // additional cycles charged after a miss resolves (see GeneralCacheConfig::with_miss_penalty)
     miss_penalty: usize,
 
+    // write policy in effect (see GeneralCacheConfig::with_write_policy)
+    write_policy: WritePolicy,
+
     // statistic information
     pub hpm: StatisticInfo,
 }
@@ -196,6 +221,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> GeneralCache<RP, M> {
             pending_req: None,
             backup_req: None,
             miss_penalty: config.miss_penalty.unwrap_or(DEFAULT_MISS_PENALTY_CYCLES),
+            write_policy: config.write_policy.unwrap_or_default(),
             hpm: StatisticInfo::new(config.name),
         }
     }
@@ -290,6 +316,12 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                     Ok(way_index) => {
                         // read the whole data block at first
                         let mut read_block = self.set[index].read_block(way_index);
+                        // If a store hit on a write-through policy, we
+                        // need to *also* drive the same write to the
+                        // next level — instead of going back to Idle we
+                        // transition to WriteThroughCommit. Track that
+                        // here so we can decide after the inner match.
+                        let mut next_state: Option<MainStates> = None;
 
                         // handle read or write to the cache
                         match req {
@@ -303,26 +335,68 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                             MemoryReqType::Store(store_req) => {
                                 read_block[offset..(offset + req.get_len())]
                                     .clone_from_slice(&*store_req.store_data);
-                                self.set[index].write_block(way_index, &read_block);
-                                store_req.done.set(true);
                                 self.hpm.store(false); // update HPM
+                                if self.write_policy.is_write_through() {
+                                    // Cache copy stays clean (matches
+                                    // memory after the propagate
+                                    // completes).
+                                    self.set[index]
+                                        .write_block_clean(way_index, &read_block);
+                                    let propagate = MemoryStoreReq {
+                                        addr: req.get_addr(),
+                                        len: req.get_len(),
+                                        store_data: store_req.store_data.clone(),
+                                        done: Rc::new(Cell::new(false)),
+                                    };
+                                    let caller_done = store_req.done.clone();
+                                    next_state = Some(MainStates::WriteThroughCommit(
+                                        StatesForOutMemReq::SendReq(
+                                            MemoryReqType::Store(propagate),
+                                        ),
+                                        caller_done,
+                                    ));
+                                } else {
+                                    // Write-back: dirty the cache, ack
+                                    // the requester immediately.
+                                    self.set[index].write_block(way_index, &read_block);
+                                    store_req.done.set(true);
+                                }
                             }
                         }
 
-                        // reset FSM, back to Idle state
-                        self.fsm = MainStates::Idle;
+                        // reset FSM (Idle for WB, propagate for WT)
+                        self.fsm = next_state.unwrap_or(MainStates::Idle);
                     }
 
                     // match arms 2: cache miss
                     Err((need_write_back, evict_way)) => {
                         // update HPM
-                        match req {
-                            MemoryReqType::Load(_) => {
-                                self.hpm.load(true);
-                            }
-                            MemoryReqType::Store(_) => {
-                                self.hpm.store(true);
-                            }
+                        let req_is_store = matches!(req, MemoryReqType::Store(_));
+                        if req_is_store {
+                            self.hpm.store(true);
+                        } else {
+                            self.hpm.load(true);
+                        }
+
+                        // No-write-allocate: a store miss bypasses the
+                        // cache entirely. Send the store to the next
+                        // level and skip allocation.
+                        if req_is_store && self.write_policy.is_no_write_allocate() {
+                            let store_req = req.get_store_req_ref();
+                            let propagate = MemoryStoreReq {
+                                addr: store_req.addr,
+                                len: store_req.len,
+                                store_data: store_req.store_data.clone(),
+                                done: Rc::new(Cell::new(false)),
+                            };
+                            let caller_done = store_req.done.clone();
+                            self.fsm = MainStates::WriteAround(
+                                StatesForOutMemReq::SendReq(
+                                    MemoryReqType::Store(propagate),
+                                ),
+                                caller_done,
+                            );
+                            return;
                         }
 
                         // store current req to self.backup_req
@@ -457,6 +531,52 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
             MainStates::AdditionalMissPenalty(ref counter) if *counter == 0 => {
                 // println!("Cache Count...");
                 self.fsm = MainStates::Lookup(self.backup_req.take().unwrap());
+            }
+
+            // * write-through commit: drive the propagated store to the
+            //   next level of memory. When it completes, ack the caller.
+            MainStates::WriteThroughCommit(ref mut second_state, ref caller_done) => {
+                let mut completed = false;
+                match second_state {
+                    StatesForOutMemReq::SendReq(ref req) => {
+                        if self.mem_ref.borrow_mut().try_register_req(req).is_ok() {
+                            *second_state =
+                                StatesForOutMemReq::WaitForComplete(req.clone());
+                        }
+                    }
+                    StatesForOutMemReq::WaitForComplete(ref req) => {
+                        if req.get_done() {
+                            caller_done.set(true);
+                            completed = true;
+                        }
+                    }
+                }
+                if completed {
+                    self.fsm = MainStates::Idle;
+                }
+            }
+
+            // * write-around: send the bypassing store to the next level
+            //   and, when it completes, ack the caller.
+            MainStates::WriteAround(ref mut second_state, ref caller_done) => {
+                let mut completed = false;
+                match second_state {
+                    StatesForOutMemReq::SendReq(ref req) => {
+                        if self.mem_ref.borrow_mut().try_register_req(req).is_ok() {
+                            *second_state =
+                                StatesForOutMemReq::WaitForComplete(req.clone());
+                        }
+                    }
+                    StatesForOutMemReq::WaitForComplete(ref req) => {
+                        if req.get_done() {
+                            caller_done.set(true);
+                            completed = true;
+                        }
+                    }
+                }
+                if completed {
+                    self.fsm = MainStates::Idle;
+                }
             }
 
             // * other situations -> do nothing
@@ -683,6 +803,116 @@ mod unit_tests {
             18,
             "cycle difference should equal the configured penalty delta"
         );
+    }
+
+    /// Drive a `cache` + `mem` pair until `done` is set on `req`. Used
+    /// by write-policy tests.
+    fn run_until_done<M: AbstractMemoryInterface>(
+        cache: &mut GeneralCache<FifoRP, M>,
+        mem: &Rc<RefCell<M>>,
+        done: &Rc<Cell<bool>>,
+    ) {
+        for _ in 0..10_000 {
+            if done.get() {
+                return;
+            }
+            cache.tick();
+            mem.borrow_mut().tick();
+        }
+        panic!("request never completed");
+    }
+
+    /// Build a cache configured with the given write policy, backed by a
+    /// fresh zero-initialised SimpleMem.
+    fn build_cache_with_policy(
+        wp: write_policy::WritePolicy,
+    ) -> (GeneralCache<FifoRP, SimpleMem>, Rc<RefCell<SimpleMem>>) {
+        let mem = Rc::new(RefCell::new(SimpleMem::new(vec![0u8; 0x10000])));
+        let cfg = GeneralCacheConfig::new("test".to_string())
+            .with_total_size(4096)
+            .with_block_size(32)
+            .with_num_of_way(2)
+            .with_miss_penalty(1)
+            .with_write_policy(wp);
+        let cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));
+        (cache, mem)
+    }
+
+    #[test]
+    fn write_through_propagates_store_hit_to_memory() {
+        // WT-WA: first store misses → cache allocates → re-enters Lookup
+        // with the original Store, which now hits and the WT path also
+        // writes through to backing memory. Verify mem holds the store
+        // data after the store completes.
+        let (mut cache, mem) =
+            build_cache_with_policy(write_policy::WritePolicy::WriteThroughWriteAllocate);
+
+        let store = MemoryReqType::Store(MemoryStoreReq {
+            addr: 0x40,
+            len: 4,
+            store_data: vec![0xAB, 0xCD, 0xEF, 0x12].into_boxed_slice(),
+            done: Rc::new(Cell::new(false)),
+        });
+        cache.try_register_req(&store).expect("register store");
+        run_until_done(&mut cache, &mem, &store.get_store_req_ref().done);
+
+        // Read straight from memory and assert the bytes match.
+        let probe = MemoryReqType::Load(MemoryLoadReq {
+            addr: 0x40,
+            len: 4,
+            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+            done: Rc::new(Cell::new(false)),
+        });
+        mem.borrow_mut()
+            .try_register_req(&probe)
+            .expect("register mem probe");
+        while !probe.get_load_req_ref().done.get() {
+            mem.borrow_mut().tick();
+        }
+        let buf = probe.get_load_req_ref().buffer.borrow();
+        assert_eq!(buf[0], 0xAB);
+        assert_eq!(buf[1], 0xCD);
+        assert_eq!(buf[2], 0xEF);
+        assert_eq!(buf[3], 0x12);
+    }
+
+    #[test]
+    fn no_write_allocate_bypasses_cache_on_store_miss() {
+        // WB-NWA: a store miss should NOT install the block into the
+        // cache; the next load to the same address should also miss.
+        let (mut cache, mem) =
+            build_cache_with_policy(write_policy::WritePolicy::WriteBackNoWriteAllocate);
+
+        let store = MemoryReqType::Store(MemoryStoreReq {
+            addr: 0x80,
+            len: 4,
+            store_data: vec![0x11, 0x22, 0x33, 0x44].into_boxed_slice(),
+            done: Rc::new(Cell::new(false)),
+        });
+        cache.try_register_req(&store).expect("register store");
+        run_until_done(&mut cache, &mem, &store.get_store_req_ref().done);
+
+        let before_load = cache.hpm.load_miss_cnt;
+        let load = MemoryReqType::Load(MemoryLoadReq {
+            addr: 0x80,
+            len: 4,
+            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+            done: Rc::new(Cell::new(false)),
+        });
+        cache.try_register_req(&load).expect("register load");
+        run_until_done(&mut cache, &mem, &load.get_load_req_ref().done);
+        // Same address ⇒ load should miss because the store did not
+        // allocate; the load_miss counter must have advanced.
+        assert!(
+            cache.hpm.load_miss_cnt > before_load,
+            "expected load miss after no-write-allocate store"
+        );
+        // And the loaded value must equal what the bypassed store wrote.
+        let buf = load.get_load_req_ref().buffer.borrow();
+        assert_eq!(buf[0], 0x11);
+        assert_eq!(buf[1], 0x22);
+        assert_eq!(buf[2], 0x33);
+        assert_eq!(buf[3], 0x44);
     }
 
     // #[test]
