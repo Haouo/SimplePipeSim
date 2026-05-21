@@ -60,13 +60,67 @@ impl GeneralCacheConfig {
     }
 }
 
-/// States for Main FSM to control the overall actions of the GeneralCache.
+/// States for the main FSM that drives a `GeneralCache`.
+///
+/// External timing contract
+/// ------------------------
+/// The cache is "synchronous from the requester's point of view":
+/// a hit completes in the **same cycle** as `try_register_req`. To make
+/// that work while still modelling the controller as a clocked FSM, the
+/// `try_register_req` path calls `tick()` twice in-line right after
+/// storing the new request — see the "Synchronous-hit pre-tick" note in
+/// [`AbstractMemoryInterface::try_register_req`] below.
+///
+/// State diagram
+/// -------------
+/// ```text
+///                        ┌───────────────────────────────┐
+///                        ▼                               │
+///   ┌──────┐ pending_req ┌────────┐ hit                 │
+///   │ Idle │────────────▶│ Lookup │─────────────────────┘
+///   └──────┘             └────────┘
+///       ▲                    │ miss
+///       │                    ▼
+///       │           ┌──────────────────┐  dirty victim
+///       │           │ select victim    │─────────────┐
+///       │           └──────────────────┘             │
+///       │                    │ clean victim          ▼
+///       │                    │              ┌────────────────┐
+///       │                    │              │ WriteBack      │
+///       │                    │              │ (SendReq /     │
+///       │                    │              │  WaitForCompl) │
+///       │                    │              └────────┬───────┘
+///       │                    ▼                       ▼
+///       │           ┌──────────────────────────────────┐
+///       │           │ Allocate                         │
+///       │           │ (SendReq / WaitForComplete)      │
+///       │           └────────────────┬─────────────────┘
+///       │                            ▼
+///       │           ┌──────────────────────────────────┐
+///       │           │ AdditionalMissPenalty(countdown) │
+///       │           └────────────────┬─────────────────┘
+///       │                            │ countdown reaches 0,
+///       └────────────────────────────┘ re-enter Lookup to finish
+///                                      the original request
+/// ```
+///
+/// `WriteBack` and `Allocate` each carry a small secondary FSM
+/// (`StatesForOutMemReq`) plus the index of the way being evicted.
 enum MainStates {
+    /// No request in flight, no pending request to start.
     Idle,
-    Lookup(MemoryReqType), // with request from upper-level memory (i.e., access requester)
-    WriteBack(StatesForOutMemReq, usize), // with write request to next-level memory
-    Allocate(StatesForOutMemReq, usize), // with read request to next-level memory
-    AdditionalMissPenalty(usize), // with countdown counter for additional miss penalty delay
+    /// Tag-compare against the indexed set. On hit, complete in this tick;
+    /// on miss, transition to WriteBack (dirty victim) or Allocate (clean).
+    Lookup(MemoryReqType),
+    /// Sending or waiting for a write-back of a dirty victim to the next
+    /// level of memory. `usize` is the evicted way index.
+    WriteBack(StatesForOutMemReq, usize),
+    /// Sending or waiting for a refill from the next level of memory.
+    /// `usize` is the way index the refill will be inserted into.
+    Allocate(StatesForOutMemReq, usize),
+    /// Stall for an additional fixed penalty after a miss completes,
+    /// modelling tag-array re-access / pipeline bubble cost.
+    AdditionalMissPenalty(usize),
 }
 
 /// States of secondary FSM to handling memory requests to next-level memory.
@@ -165,11 +219,26 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> AbstractMemoryInterface 
             MainStates::Idle if self.pending_req.is_none() => {
                 self.pending_req = Some(req.clone());
 
-                // **INFO** 2 pre-ticks to imitate synchronous access
-                /* --------------------------- */
+                // Synchronous-hit pre-tick.
+                //
+                // External contract: a cache hit completes in the SAME cycle
+                // as the call to `try_register_req`, i.e. `req.done == true`
+                // returns to the caller before this method returns.
+                //
+                // Internal model: the FSM normally needs two ticks to do that
+                // work:
+                //   tick 1: Idle (with `pending_req` set) → Lookup
+                //   tick 2: Lookup body runs tag-compare, and on hit fills
+                //           the requester's buffer and sets `done = true`.
+                //
+                // We compress those two ticks into the registration call so
+                // the caller sees a 1-cycle hit latency. On a miss the
+                // second tick lands in the Lookup state and the FSM keeps
+                // running over subsequent `tick()` calls as usual; the only
+                // observable effect is that the miss-penalty timeline
+                // starts one cycle earlier, which is the intended model.
                 self.tick();
                 self.tick();
-                /* --------------------------- */
 
                 return Ok(());
             }
