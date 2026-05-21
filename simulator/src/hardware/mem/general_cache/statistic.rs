@@ -1,4 +1,4 @@
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize)]
 pub struct StatisticInfo {
     // be recorded during runtime
     pub name: String,
