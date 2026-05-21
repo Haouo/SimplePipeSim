@@ -54,6 +54,10 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = ReplacementPolicyArg::Fifo)]
     pub rp: ReplacementPolicyArg,
 
+    /// Write policy for all caches.
+    #[arg(long, value_enum, default_value_t = WritePolicyArg::WbWa)]
+    pub wp: WritePolicyArg,
+
     /// Write per-cache statistics to this JSON file.
     /// Schema: { "l1i": StatisticInfo, "l1d": StatisticInfo, "l2": StatisticInfo,
     /// "config": { mirror of CLI args } }.
@@ -68,4 +72,38 @@ pub enum ReplacementPolicyArg {
     Random,
     /// Tree-based pseudo-LRU. Requires power-of-two associativity.
     Plru,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum WritePolicyArg {
+    /// Write-back + write-allocate (default).
+    #[clap(name = "wb-wa")]
+    #[serde(rename = "wb-wa")]
+    WbWa,
+    /// Write-back + no-write-allocate.
+    #[clap(name = "wb-nwa")]
+    #[serde(rename = "wb-nwa")]
+    WbNwa,
+    /// Write-through + write-allocate.
+    #[clap(name = "wt-wa")]
+    #[serde(rename = "wt-wa")]
+    WtWa,
+    /// Write-through + no-write-allocate.
+    #[clap(name = "wt-nwa")]
+    #[serde(rename = "wt-nwa")]
+    WtNwa,
+}
+
+impl From<WritePolicyArg>
+    for crate::hardware::mem::general_cache::write_policy::WritePolicy
+{
+    fn from(a: WritePolicyArg) -> Self {
+        use crate::hardware::mem::general_cache::write_policy::WritePolicy;
+        match a {
+            WritePolicyArg::WbWa => WritePolicy::WriteBackWriteAllocate,
+            WritePolicyArg::WbNwa => WritePolicy::WriteBackNoWriteAllocate,
+            WritePolicyArg::WtWa => WritePolicy::WriteThroughWriteAllocate,
+            WritePolicyArg::WtNwa => WritePolicy::WriteThroughNoWriteAllocate,
+        }
+    }
 }
