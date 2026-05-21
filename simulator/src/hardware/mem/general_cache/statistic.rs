@@ -6,6 +6,10 @@ pub struct StatisticInfo {
     pub store_cnt: usize,
     pub load_miss_cnt: usize,
     pub store_miss_cnt: usize,
+    /// Number of synthetic prefetch lookups issued by this cache. A
+    /// hardware-level prefetcher hint that materialised as a real
+    /// next-level memory access.
+    pub prefetch_issued_cnt: usize,
     // be calculated after ending of simulation
     pub load_miss_rate: f64,
     pub store_miss_rate: f64,
