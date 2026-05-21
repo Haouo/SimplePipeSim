@@ -83,6 +83,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         ReplacementPolicyArg::Random => {
             run_simulation::<rp::random::RandomRP>(entry_pc, prog_body, l1i_cfg, l1d_cfg, l2_cfg)
         }
+        ReplacementPolicyArg::Plru => run_simulation::<rp::pseudo_lru::PseudoLruRP>(
+            entry_pc, prog_body, l1i_cfg, l1d_cfg, l2_cfg,
+        ),
     };
 
     println!("Program: {}", args.prog);
