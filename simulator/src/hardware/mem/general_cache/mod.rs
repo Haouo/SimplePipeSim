@@ -383,12 +383,8 @@ where
 {
     type StatisticInfo = statistic::StatisticInfo;
     fn get_statistic_info(&self) -> Self::StatisticInfo {
-        // calculate parts of statistics info.
         let mut ret = self.hpm.clone();
-        ret.load_miss_rate = ret.load_miss_cnt as f64 / (ret.load_cnt + ret.store_cnt) as f64;
-        ret.store_miss_rate = ret.store_miss_cnt as f64 / (ret.load_cnt + ret.store_cnt) as f64;
-        ret.overall_miss_rate = ret.load_miss_rate + ret.store_miss_rate;
-        // return
+        ret.finalize_rates();
         ret
     }
 }
