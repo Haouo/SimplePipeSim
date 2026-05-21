@@ -13,8 +13,9 @@ use statistic::StatisticInfo;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-// constants
-const CACHE_MISS_ADDITIONAL_PENALTY: usize = 5;
+/// Default additional miss penalty in cycles, used when
+/// [`GeneralCacheConfig::with_miss_penalty`] is not called.
+const DEFAULT_MISS_PENALTY_CYCLES: usize = 5;
 
 // a special struct data type for cache configuring
 #[derive(Default, Clone)]
@@ -23,6 +24,11 @@ pub struct GeneralCacheConfig {
     total_size: Option<usize>,
     block_size: Option<usize>,
     num_of_way: Option<usize>,
+    /// Additional cycles charged after a miss resolves, on top of the
+    /// time taken to fetch from the next-level memory. Models tag-array
+    /// re-access and the pipeline bubble while the refilled block becomes
+    /// visible. `None` means "use the default".
+    miss_penalty: Option<usize>,
 }
 
 impl GeneralCacheConfig {
@@ -56,6 +62,17 @@ impl GeneralCacheConfig {
         );
         let mut new_self = self.clone();
         new_self.num_of_way = Some(ways);
+        new_self
+    }
+
+    /// Set the additional miss penalty (in cycles) for this cache level.
+    ///
+    /// If not set, the cache uses [`DEFAULT_MISS_PENALTY_CYCLES`] (5). Use this
+    /// to express that, for example, an L1 cache has a smaller post-miss
+    /// recovery cost than an L2 cache that drives main memory.
+    pub fn with_miss_penalty(&self, cycles: usize) -> Self {
+        let mut new_self = self.clone();
+        new_self.miss_penalty = Some(cycles);
         new_self
     }
 }
@@ -150,6 +167,9 @@ pub struct GeneralCache<RP: ReplacementPolicy, M: AbstractMemoryInterface> {
     // backup of the request being handled when the cache is writing-back or allocating
     backup_req: Option<MemoryReqType>,
 
+    // additional cycles charged after a miss resolves (see GeneralCacheConfig::with_miss_penalty)
+    miss_penalty: usize,
+
     // statistic information
     pub hpm: StatisticInfo,
 }
@@ -175,6 +195,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> GeneralCache<RP, M> {
             mem_ref,
             pending_req: None,
             backup_req: None,
+            miss_penalty: config.miss_penalty.unwrap_or(DEFAULT_MISS_PENALTY_CYCLES),
             hpm: StatisticInfo::new(config.name),
         }
     }
@@ -422,8 +443,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                             self.set[index].insert_block(*evict_way, new_tag, load_data.as_ref());
 
                             // transfer self.fsm to AdditionalMissPenalty state
-                            self.fsm =
-                                MainStates::AdditionalMissPenalty(CACHE_MISS_ADDITIONAL_PENALTY);
+                            self.fsm = MainStates::AdditionalMissPenalty(self.miss_penalty);
                         }
                     }
                 }
@@ -611,6 +631,58 @@ mod unit_tests {
         for item in read_req.get_load_req_ref().buffer.borrow().iter() {
             assert_eq!(*item, 116);
         }
+    }
+
+    /// Build a cache with the given miss penalty and resolve one cold-miss
+    /// load to completion. Return the number of ticks observed by the caller
+    /// (i.e. the cycles spent between issuing the request and seeing `done`
+    /// become true, *not counting* the synchronous-hit pre-ticks done inside
+    /// `try_register_req`).
+    fn cycles_to_resolve_cold_miss(miss_penalty_cycles: usize) -> usize {
+        let mem = Rc::new(RefCell::new(SimpleMem::new(vec![0u8; 0x10000])));
+        let cfg = GeneralCacheConfig::new("test".to_string())
+            .with_total_size(4096)
+            .with_block_size(32)
+            .with_num_of_way(2)
+            .with_miss_penalty(miss_penalty_cycles);
+        let mut cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));
+
+        let req = MemoryReqType::Load(MemoryLoadReq {
+            addr: 0,
+            len: 4,
+            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+            done: Rc::new(Cell::new(false)),
+        });
+        cache.try_register_req(&req).expect("register req");
+
+        let mut ticks = 0usize;
+        while !req.get_load_req_ref().done.get() {
+            cache.tick();
+            mem.borrow_mut().tick();
+            ticks += 1;
+        }
+        ticks
+    }
+
+    #[test]
+    fn miss_penalty_is_per_cache_configurable() {
+        // Same workload, only the configured miss penalty differs. A miss
+        // that takes N cycles at penalty P should take N + delta cycles at
+        // penalty P + delta — proving the FSM uses the per-cache value
+        // rather than a global constant.
+        let low = cycles_to_resolve_cold_miss(2);
+        let high = cycles_to_resolve_cold_miss(20);
+        assert!(
+            high > low,
+            "higher miss_penalty must take more cycles (low={}, high={})",
+            low,
+            high
+        );
+        assert_eq!(
+            high - low,
+            18,
+            "cycle difference should equal the configured penalty delta"
+        );
     }
 
     // #[test]
