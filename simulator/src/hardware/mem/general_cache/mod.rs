@@ -1,5 +1,6 @@
 // sub-modules
 pub mod cache_set; // model for single cache set (might contains multiple ways)
+pub mod prefetcher; // model for cache prefetcher (Null, NextLine, ...)
 pub mod replacement_policy; // model for cache replacement policy (e.g., Random, FIFO, LRU)
 pub mod statistic; // utils of statistics for cache
 pub mod write_policy; // model for cache write policy (WB/WT × WA/NWA)
@@ -8,11 +9,13 @@ use super::super::statistic::Statistic;
 use crate::hardware::clock::Clocked;
 use crate::hardware::mem::abstract_mem::*;
 use cache_set::GeneralCacheSetUnit;
+use prefetcher::{Prefetcher, PrefetcherKind};
 use replacement_policy::ReplacementPolicy;
 use statistic::StatisticInfo;
 use write_policy::WritePolicy;
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 /// Default additional miss penalty in cycles, used when
@@ -34,6 +37,9 @@ pub struct GeneralCacheConfig {
     /// Write policy. `None` ⇒ `WritePolicy::default()` (write-back +
     /// write-allocate, the historical behaviour).
     write_policy: Option<WritePolicy>,
+    /// Hardware prefetcher. `None` ⇒ `PrefetcherKind::default()`
+    /// (`Null`, i.e. disabled).
+    prefetcher_kind: Option<PrefetcherKind>,
 }
 
 impl GeneralCacheConfig {
@@ -85,6 +91,13 @@ impl GeneralCacheConfig {
     pub fn with_write_policy(&self, wp: WritePolicy) -> Self {
         let mut new_self = self.clone();
         new_self.write_policy = Some(wp);
+        new_self
+    }
+
+    /// Set the hardware prefetcher kind. Defaults to `Null` (disabled).
+    pub fn with_prefetcher_kind(&self, kind: PrefetcherKind) -> Self {
+        let mut new_self = self.clone();
+        new_self.prefetcher_kind = Some(kind);
         new_self
     }
 }
@@ -195,6 +208,21 @@ pub struct GeneralCache<RP: ReplacementPolicy, M: AbstractMemoryInterface> {
     // write policy in effect (see GeneralCacheConfig::with_write_policy)
     write_policy: WritePolicy,
 
+    // -------- prefetcher subsystem --------
+    // Pluggable predictor: inspects each demand-access Lookup and may
+    // queue block-aligned addresses to fetch ahead of time.
+    prefetcher: Box<dyn Prefetcher>,
+    // Addresses the prefetcher wants us to fetch. Drained one-at-a-time
+    // from the Idle arm when no demand request is pending and no prefetch
+    // is already in flight.
+    prefetch_queue: VecDeque<u32>,
+    // True while a synthetic prefetch request is occupying the FSM
+    // (Lookup → Allocate → MissPenalty → Lookup). Demand-access HPM
+    // counters and re-prediction are suppressed while this flag is set.
+    prefetch_in_flight: bool,
+    // Block size in bytes; used to size the synthetic prefetch load.
+    block_size_bytes: usize,
+
     // statistic information
     pub hpm: StatisticInfo,
 }
@@ -203,18 +231,17 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> GeneralCache<RP, M> {
     // public methods
     /// only constructor for GeneralCache
     pub fn new(config: GeneralCacheConfig, mem_ref: Rc<RefCell<M>>) -> Self {
-        let num_set =
-            config.total_size.unwrap() / (config.block_size.unwrap() * config.num_of_way.unwrap());
+        let block_size = config.block_size.unwrap();
+        let num_set = config.total_size.unwrap() / (block_size * config.num_of_way.unwrap());
+        let prefetcher = config
+            .prefetcher_kind
+            .unwrap_or_default()
+            .build(block_size);
         GeneralCache {
-            offset_bit_width: config.block_size.unwrap().ilog2() as usize,
+            offset_bit_width: block_size.ilog2() as usize,
             index_bit_width: num_set.ilog2() as usize,
             set: (0..num_set)
-                .map(|_| {
-                    GeneralCacheSetUnit::<RP>::new(
-                        config.num_of_way.unwrap(),
-                        config.block_size.unwrap(),
-                    )
-                })
+                .map(|_| GeneralCacheSetUnit::<RP>::new(config.num_of_way.unwrap(), block_size))
                 .collect(),
             fsm: MainStates::Idle,
             mem_ref,
@@ -222,6 +249,10 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> GeneralCache<RP, M> {
             backup_req: None,
             miss_penalty: config.miss_penalty.unwrap_or(DEFAULT_MISS_PENALTY_CYCLES),
             write_policy: config.write_policy.unwrap_or_default(),
+            prefetcher,
+            prefetch_queue: VecDeque::new(),
+            prefetch_in_flight: false,
+            block_size_bytes: block_size,
             hpm: StatisticInfo::new(config.name),
         }
     }
@@ -299,6 +330,29 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
     /// tick function which is called in every cycles
     fn tick(&mut self) {
         match self.fsm {
+            // * Idle, no demand request, but a prefetch is pending in the
+            //   queue. Drain one prefetch and inject it as a synthetic
+            //   Lookup. Placed BEFORE the demand-Idle arm so the guard
+            //   makes the priority explicit (demand always wins because
+            //   its guard requires `pending_req.is_some()`).
+            MainStates::Idle
+                if self.pending_req.is_none()
+                    && !self.prefetch_in_flight
+                    && !self.prefetch_queue.is_empty() =>
+            {
+                let addr = self.prefetch_queue.pop_front().unwrap();
+                let len = self.block_size_bytes;
+                let synthetic = MemoryReqType::Load(MemoryLoadReq {
+                    addr,
+                    len,
+                    buffer: Rc::new(RefCell::new(vec![0u8; len].into_boxed_slice())),
+                    done: Rc::new(Cell::new(false)),
+                });
+                self.prefetch_in_flight = true;
+                self.hpm.prefetch_issued_cnt += 1;
+                self.fsm = MainStates::Lookup(synthetic);
+            }
+
             // * Idle state with pending request
             MainStates::Idle if self.pending_req.is_some() => {
                 // accept new request and transfer current state
@@ -307,8 +361,22 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
 
             // * Lookup state
             MainStates::Lookup(ref req) => {
-                let (tag, index, offset) = self.addr_transfer(req.get_addr());
+                // Snapshot the bits of `req` we'll need *after* the inner
+                // match closes. This lets us run the post-action
+                // (prefetch tracking + predict) without holding a borrow
+                // on `self.fsm` that conflicts with later mutations.
+                let req_addr = req.get_addr();
+                let req_is_store = matches!(req, MemoryReqType::Store(_));
+                // Snapshot of prefetch_in_flight at lookup start: if the
+                // request we're servicing is itself a synthetic prefetch
+                // we suppress demand-access HPM updates and skip
+                // re-prediction (which would otherwise feed back on
+                // ourselves).
+                let is_prefetch = self.prefetch_in_flight;
+
+                let (tag, index, offset) = self.addr_transfer(req_addr);
                 let tag_compare_result = self.set[index].tag_compare(tag);
+                let is_hit = tag_compare_result.is_ok();
 
                 // check whether it is hit or miss
                 match tag_compare_result {
@@ -330,12 +398,16 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                                     &read_block[offset..(offset + req.get_len())],
                                 );
                                 load_req.done.set(true);
-                                self.hpm.load(false); // update HPM
+                                if !is_prefetch {
+                                    self.hpm.load(false); // update HPM
+                                }
                             }
                             MemoryReqType::Store(store_req) => {
                                 read_block[offset..(offset + req.get_len())]
                                     .clone_from_slice(&*store_req.store_data);
-                                self.hpm.store(false); // update HPM
+                                if !is_prefetch {
+                                    self.hpm.store(false); // update HPM
+                                }
                                 if self.write_policy.is_write_through() {
                                     // Cache copy stays clean (matches
                                     // memory after the propagate
@@ -371,17 +443,18 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                     // match arms 2: cache miss
                     Err((need_write_back, evict_way)) => {
                         // update HPM
-                        let req_is_store = matches!(req, MemoryReqType::Store(_));
-                        if req_is_store {
-                            self.hpm.store(true);
-                        } else {
-                            self.hpm.load(true);
+                        if !is_prefetch {
+                            if req_is_store {
+                                self.hpm.store(true);
+                            } else {
+                                self.hpm.load(true);
+                            }
                         }
 
-                        // No-write-allocate: a store miss bypasses the
-                        // cache entirely. Send the store to the next
-                        // level and skip allocation.
                         if req_is_store && self.write_policy.is_no_write_allocate() {
+                            // No-write-allocate: a store miss bypasses
+                            // the cache entirely. Send the store to the
+                            // next level and skip allocation.
                             let store_req = req.get_store_req_ref();
                             let propagate = MemoryStoreReq {
                                 addr: store_req.addr,
@@ -391,66 +464,88 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                             };
                             let caller_done = store_req.done.clone();
                             self.fsm = MainStates::WriteAround(
-                                StatesForOutMemReq::SendReq(
-                                    MemoryReqType::Store(propagate),
-                                ),
+                                StatesForOutMemReq::SendReq(MemoryReqType::Store(propagate)),
                                 caller_done,
                             );
-                            return;
-                        }
-
-                        // store current req to self.backup_req
-                        self.backup_req = Some(req.clone());
-
-                        // judge whether it needs to write-back
-                        if need_write_back {
-                            // get original tag of the old block (used in address of write-back request)
-                            let old_tag = self.set[index].get_tag(evict_way);
-                            let write_back_addr = ((old_tag
-                                << (self.index_bit_width + self.offset_bit_width)) // tag part
-                                + ((index as u32) << self.offset_bit_width)) // index part
-                                & !((1 << self.offset_bit_width) - 1); // bit mask
-                                                                       // get data of the old block which is dirty
-                            let old_dirty_data = self.set[index].read_block(evict_way);
-
-                            // construct MemoryReqType::Store
-                            let write_back_store_req = MemoryStoreReq {
-                                addr: write_back_addr,
-                                len: old_dirty_data.len(),
-                                store_data: old_dirty_data,
-                                done: Rc::new(Cell::new(false)),
-                            };
-
-                            // transfer self.fsm to WriteBack
-                            self.fsm = MainStates::WriteBack(
-                                StatesForOutMemReq::SendReq(MemoryReqType::Store(
-                                    write_back_store_req,
-                                )),
-                                evict_way,
-                            );
                         } else {
-                            // calculate allocate address and length (in bytes)
-                            let allocate_addr = ((tag
-                                << (self.index_bit_width + self.offset_bit_width))
-                                + (index << self.offset_bit_width) as u32)
-                                & !((1 << self.offset_bit_width) - 1);
-                            let allocate_len = 2usize.pow(self.offset_bit_width as u32);
+                            // store current req to self.backup_req
+                            self.backup_req = Some(req.clone());
 
-                            // construct MemoryReqType::Load
-                            let allocate_read_req = MemoryLoadReq {
-                                addr: allocate_addr,
-                                len: allocate_len,
-                                buffer: Rc::new(RefCell::new(
-                                    vec![0u8; allocate_len].into_boxed_slice(),
-                                )),
-                                done: Rc::new(Cell::new(false)),
-                            };
+                            // judge whether it needs to write-back
+                            if need_write_back {
+                                // get original tag of the old block (used in address of write-back request)
+                                let old_tag = self.set[index].get_tag(evict_way);
+                                let write_back_addr = ((old_tag
+                                    << (self.index_bit_width + self.offset_bit_width)) // tag part
+                                    + ((index as u32) << self.offset_bit_width)) // index part
+                                    & !((1 << self.offset_bit_width) - 1); // bit mask
+                                // get data of the old block which is dirty
+                                let old_dirty_data = self.set[index].read_block(evict_way);
 
-                            // transfer self.fsm to Allocate
-                            self.fsm = MainStates::Allocate(
-                                StatesForOutMemReq::SendReq(MemoryReqType::Load(allocate_read_req)),
-                                evict_way,
-                            );
+                                // construct MemoryReqType::Store
+                                let write_back_store_req = MemoryStoreReq {
+                                    addr: write_back_addr,
+                                    len: old_dirty_data.len(),
+                                    store_data: old_dirty_data,
+                                    done: Rc::new(Cell::new(false)),
+                                };
+
+                                // transfer self.fsm to WriteBack
+                                self.fsm = MainStates::WriteBack(
+                                    StatesForOutMemReq::SendReq(MemoryReqType::Store(
+                                        write_back_store_req,
+                                    )),
+                                    evict_way,
+                                );
+                            } else {
+                                // calculate allocate address and length (in bytes)
+                                let allocate_addr = ((tag
+                                    << (self.index_bit_width + self.offset_bit_width))
+                                    + (index << self.offset_bit_width) as u32)
+                                    & !((1 << self.offset_bit_width) - 1);
+                                let allocate_len = 2usize.pow(self.offset_bit_width as u32);
+
+                                // construct MemoryReqType::Load
+                                let allocate_read_req = MemoryLoadReq {
+                                    addr: allocate_addr,
+                                    len: allocate_len,
+                                    buffer: Rc::new(RefCell::new(
+                                        vec![0u8; allocate_len].into_boxed_slice(),
+                                    )),
+                                    done: Rc::new(Cell::new(false)),
+                                };
+
+                                // transfer self.fsm to Allocate
+                                self.fsm = MainStates::Allocate(
+                                    StatesForOutMemReq::SendReq(MemoryReqType::Load(
+                                        allocate_read_req,
+                                    )),
+                                    evict_way,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // --- Post-resolution hooks for the prefetcher subsystem ---
+                //
+                // 1. If the request we just serviced was itself a
+                //    synthetic prefetch and it HIT (either immediately,
+                //    or on the re-entry that follows Allocate +
+                //    MissPenalty), the prefetch is now resolved and the
+                //    FSM is free to issue the next queued prefetch.
+                // 2. Otherwise (this was a demand access) ask the
+                //    prefetcher what it wants next, and queue each
+                //    suggestion exactly once.
+                if is_prefetch {
+                    if is_hit {
+                        self.prefetch_in_flight = false;
+                    }
+                } else {
+                    let predictions = self.prefetcher.predict(req_addr, is_hit, req_is_store);
+                    for addr in predictions {
+                        if !self.prefetch_queue.contains(&addr) {
+                            self.prefetch_queue.push_back(addr);
                         }
                     }
                 }
@@ -913,6 +1008,93 @@ mod unit_tests {
         assert_eq!(buf[1], 0x22);
         assert_eq!(buf[2], 0x33);
         assert_eq!(buf[3], 0x44);
+    }
+
+    /// Drive `n_blocks` sequential block-aligned loads through a cache
+    /// configured with the given prefetcher kind, then drain any
+    /// outstanding prefetches. Return `(load_miss_cnt, prefetch_issued_cnt)`.
+    ///
+    /// `miss_penalty` is set to 1 so the prefetch lifecycle (Lookup miss
+    /// → Allocate → MissPenalty → Lookup hit) takes few enough ticks
+    /// that the drain phase between accesses is bounded.
+    fn run_sequential_pattern(
+        kind: prefetcher::PrefetcherKind,
+        n_blocks: u32,
+        block_size: u32,
+    ) -> (usize, usize) {
+        let mem = Rc::new(RefCell::new(SimpleMem::new(vec![0u8; 0x10000])));
+        let cfg = GeneralCacheConfig::new("test".to_string())
+            .with_total_size(4096)
+            .with_block_size(block_size as usize)
+            .with_num_of_way(2)
+            .with_miss_penalty(1)
+            .with_prefetcher_kind(kind);
+        let mut cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));
+
+        for i in 0..n_blocks {
+            let req = MemoryReqType::Load(MemoryLoadReq {
+                addr: i * block_size,
+                len: 4,
+                buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
+                done: Rc::new(Cell::new(false)),
+            });
+            // Retry registration until the FSM is Idle. While a prefetch
+            // from the previous demand access is in flight we'll get
+            // Err — keep ticking so the prefetch can drain.
+            while cache.try_register_req(&req).is_err() {
+                cache.tick();
+                mem.borrow_mut().tick();
+            }
+            run_until_done(&mut cache, &mem, &req.get_load_req_ref().done);
+
+            // Give the just-queued prefetch a chance to complete before
+            // the next demand access closes the window. Without this,
+            // every prefetch sits in the queue forever because the next
+            // try_register_req fills `pending_req` immediately on entry
+            // to Idle, which beats the prefetch arm's guard.
+            for _ in 0..200 {
+                if !cache.prefetch_in_flight && cache.prefetch_queue.is_empty() {
+                    break;
+                }
+                cache.tick();
+                mem.borrow_mut().tick();
+            }
+        }
+
+        (cache.hpm.load_miss_cnt, cache.hpm.prefetch_issued_cnt)
+    }
+
+    #[test]
+    fn next_line_prefetcher_reduces_misses_on_sequential_pattern() {
+        // 5 consecutive block-aligned loads. With no prefetcher we
+        // expect one cold miss per block (5 misses). With the next-line
+        // prefetcher each demand access triggers a fetch for the
+        // following block, so only the first block should miss on
+        // demand — subsequent demand accesses should be served from the
+        // prefetched lines (prefetch misses are counted separately and
+        // are not folded into `load_miss_cnt`).
+        let (null_misses, null_prefetches) =
+            run_sequential_pattern(prefetcher::PrefetcherKind::Null, 5, 32);
+        let (nl_misses, nl_prefetches) =
+            run_sequential_pattern(prefetcher::PrefetcherKind::NextLine, 5, 32);
+
+        assert_eq!(
+            null_misses, 5,
+            "without prefetcher every cold block must miss on demand"
+        );
+        assert_eq!(
+            null_prefetches, 0,
+            "null prefetcher must never issue a synthetic fetch"
+        );
+        assert!(
+            nl_prefetches > 0,
+            "next-line prefetcher must issue at least one prefetch"
+        );
+        assert!(
+            nl_misses < null_misses,
+            "next-line prefetcher must reduce demand misses (null={}, next-line={}, prefetches_issued={})",
+            null_misses, nl_misses, nl_prefetches
+        );
     }
 
     // #[test]

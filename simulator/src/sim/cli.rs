@@ -58,6 +58,10 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = WritePolicyArg::WbWa)]
     pub wp: WritePolicyArg,
 
+    /// Hardware prefetcher for all caches.
+    #[arg(long, value_enum, default_value_t = PrefetcherArg::Null)]
+    pub prefetcher: PrefetcherArg,
+
     /// Write per-cache statistics to this JSON file.
     /// Schema: { "l1i": StatisticInfo, "l1d": StatisticInfo, "l2": StatisticInfo,
     /// "config": { mirror of CLI args } }.
@@ -104,6 +108,30 @@ impl From<WritePolicyArg>
             WritePolicyArg::WbNwa => WritePolicy::WriteBackNoWriteAllocate,
             WritePolicyArg::WtWa => WritePolicy::WriteThroughWriteAllocate,
             WritePolicyArg::WtNwa => WritePolicy::WriteThroughNoWriteAllocate,
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PrefetcherArg {
+    /// No prefetching (default).
+    Null,
+    /// Stride-1 next-line prefetcher: fetch `addr + block_size` after
+    /// every demand access.
+    #[clap(name = "next-line")]
+    #[serde(rename = "next-line")]
+    NextLine,
+}
+
+impl From<PrefetcherArg>
+    for crate::hardware::mem::general_cache::prefetcher::PrefetcherKind
+{
+    fn from(a: PrefetcherArg) -> Self {
+        use crate::hardware::mem::general_cache::prefetcher::PrefetcherKind;
+        match a {
+            PrefetcherArg::Null => PrefetcherKind::Null,
+            PrefetcherArg::NextLine => PrefetcherKind::NextLine,
         }
     }
 }

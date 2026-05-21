@@ -28,24 +28,28 @@ struct RunReport<'a> {
 
 fn build_configs(args: &Args) -> (GeneralCacheConfig, GeneralCacheConfig, GeneralCacheConfig) {
     let wp = args.wp.into();
+    let pf = args.prefetcher.into();
     let l1i = GeneralCacheConfig::new("L1-I$".to_string())
         .with_total_size(args.l1i_size)
         .with_block_size(args.l1i_block)
         .with_num_of_way(args.l1i_ways)
         .with_miss_penalty(args.l1i_penalty)
-        .with_write_policy(wp);
+        .with_write_policy(wp)
+        .with_prefetcher_kind(pf);
     let l1d = GeneralCacheConfig::new("L1-D$".to_string())
         .with_total_size(args.l1d_size)
         .with_block_size(args.l1d_block)
         .with_num_of_way(args.l1d_ways)
         .with_miss_penalty(args.l1d_penalty)
-        .with_write_policy(wp);
+        .with_write_policy(wp)
+        .with_prefetcher_kind(pf);
     let l2 = GeneralCacheConfig::new("L2$".to_string())
         .with_total_size(args.l2_size)
         .with_block_size(args.l2_block)
         .with_num_of_way(args.l2_ways)
         .with_miss_penalty(args.l2_penalty)
-        .with_write_policy(wp);
+        .with_write_policy(wp)
+        .with_prefetcher_kind(pf);
     (l1i, l1d, l2)
 }
 
