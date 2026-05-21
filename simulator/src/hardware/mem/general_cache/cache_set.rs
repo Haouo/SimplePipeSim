@@ -83,6 +83,24 @@ where
         // *do not change tag and valid bit*
     }
 
+    /// Update the cache copy of a block WITHOUT setting the dirty bit.
+    ///
+    /// Used by write-through policies: the same store also propagates to
+    /// the next level of memory in the same cycle, so the cache and
+    /// memory copies stay in sync and there is no pending write-back to
+    /// remember.
+    pub fn write_block_clean(&mut self, way_index: usize, write_data: &[u8]) {
+        assert!(self.valid_array[way_index]);
+
+        self.data_array
+            [(self.bytes_per_block * way_index)..(self.bytes_per_block * (way_index + 1))]
+            .clone_from_slice(write_data);
+
+        // Do NOT touch the dirty bit — the cache copy matches the
+        // next-level copy after this call.
+        self.rp.promote(way_index);
+    }
+
     pub fn insert_block(&mut self, way_index: usize, new_tag: u32, new_data: &[u8]) {
         // modify data block
         self.data_array

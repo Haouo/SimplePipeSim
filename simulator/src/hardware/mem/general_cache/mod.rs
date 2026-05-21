@@ -2,6 +2,7 @@
 pub mod cache_set; // model for single cache set (might contains multiple ways)
 pub mod replacement_policy; // model for cache replacement policy (e.g., Random, FIFO, LRU)
 pub mod statistic; // utils of statistics for cache
+pub mod write_policy; // model for cache write policy (WB/WT × WA/NWA)
 
 use super::super::statistic::Statistic;
 use crate::hardware::clock::Clocked;
@@ -9,6 +10,7 @@ use crate::hardware::mem::abstract_mem::*;
 use cache_set::GeneralCacheSetUnit;
 use replacement_policy::ReplacementPolicy;
 use statistic::StatisticInfo;
+use write_policy::WritePolicy;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -29,6 +31,9 @@ pub struct GeneralCacheConfig {
     /// re-access and the pipeline bubble while the refilled block becomes
     /// visible. `None` means "use the default".
     miss_penalty: Option<usize>,
+    /// Write policy. `None` ⇒ `WritePolicy::default()` (write-back +
+    /// write-allocate, the historical behaviour).
+    write_policy: Option<WritePolicy>,
 }
 
 impl GeneralCacheConfig {
@@ -73,6 +78,13 @@ impl GeneralCacheConfig {
     pub fn with_miss_penalty(&self, cycles: usize) -> Self {
         let mut new_self = self.clone();
         new_self.miss_penalty = Some(cycles);
+        new_self
+    }
+
+    /// Set the write policy. Defaults to write-back + write-allocate.
+    pub fn with_write_policy(&self, wp: WritePolicy) -> Self {
+        let mut new_self = self.clone();
+        new_self.write_policy = Some(wp);
         new_self
     }
 }
@@ -169,6 +181,9 @@ pub struct GeneralCache<RP: ReplacementPolicy, M: AbstractMemoryInterface> {
 
     // additional cycles charged after a miss resolves (see GeneralCacheConfig::with_miss_penalty)
     miss_penalty: usize,
+
+    // write policy in effect (see GeneralCacheConfig::with_write_policy)
+    write_policy: WritePolicy,
 
     // statistic information
     pub hpm: StatisticInfo,
