@@ -66,4 +66,6 @@ pub struct Args {
 pub enum ReplacementPolicyArg {
     Fifo,
     Random,
+    /// Tree-based pseudo-LRU. Requires power-of-two associativity.
+    Plru,
 }
