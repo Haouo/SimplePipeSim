@@ -70,11 +70,11 @@ where
     int_mul_div_stall_countdown: Option<usize>,
 
     // L1 Instruction Cache
-    // icache: Box<dyn AbstractMemoryInterface>,
-    pub icache: GeneralCache<RP>,
-    // l1 data cache
-    // dcache: Box<dyn AbstractMemoryInterface>,
-    pub dcache: GeneralCache<RP>,
+    pub icache: GeneralCache<RP, GeneralCache<RP, SimpleMem>>,
+    // L1 Data Cache
+    pub dcache: GeneralCache<RP, GeneralCache<RP, SimpleMem>>,
+    // L2 Unified Cache (shared by icache and dcache)
+    pub l2_cache: Rc<RefCell<GeneralCache<RP, SimpleMem>>>,
 
     // statistic information (also called Hardware Performance Monitor, HPM)
     pub hpm: statistic::StatisticInfo,
@@ -91,8 +91,12 @@ where
         init_pc: u32,
         l1i_cache_config: GeneralCacheConfig,
         l1d_cache_config: GeneralCacheConfig,
+        l2_cache_config: GeneralCacheConfig,
         mem_ref: &Rc<RefCell<SimpleMem>>,
     ) -> Self {
+        let l2_cache = Rc::new(RefCell::new(
+            GeneralCache::<RP, SimpleMem>::new(l2_cache_config, Rc::clone(mem_ref)),
+        ));
         PipelineProcessor {
             halt: false,
             if_pc: init_pc,
@@ -112,9 +116,15 @@ where
             branch_destination: 0,
             branch_flushes: 0,
             int_mul_div_stall_countdown: None,
-            // I$ configuration: 4096 bytes in total, 4-way associativity, 32 bytes for each block (implies 32 sets)
-            icache: GeneralCache::<RP>::new(l1i_cache_config, Rc::clone(mem_ref)),
-            dcache: GeneralCache::<RP>::new(l1d_cache_config, Rc::clone(mem_ref)),
+            icache: GeneralCache::<RP, GeneralCache<RP, SimpleMem>>::new(
+                l1i_cache_config,
+                l2_cache.clone(),
+            ),
+            dcache: GeneralCache::<RP, GeneralCache<RP, SimpleMem>>::new(
+                l1d_cache_config,
+                l2_cache.clone(),
+            ),
+            l2_cache,
             hpm: statistic::StatisticInfo::default(),
         }
     }
@@ -1032,9 +1042,10 @@ where
             self.exe_op.as_mut().unwrap().placeholder = true;
         }
 
-        // tick L1-I$ and L1-D$
+        // tick L1-I$, L1-D$, and L2$
         self.icache.tick();
         self.dcache.tick();
+        self.l2_cache.borrow_mut().tick();
     }
 }
 
@@ -1127,10 +1138,15 @@ mod unit_tests {
                 .with_total_size(4096)
                 .with_block_size(32)
                 .with_num_of_way(4);
+            let l2_cache_config = GeneralCacheConfig::new("L2$".to_string())
+                .with_total_size(16384)
+                .with_block_size(64)
+                .with_num_of_way(4);
             let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(
                 entry_pc,
                 l1i_cache_config,
                 l1d_cache_config,
+                l2_cache_config,
                 &mem,
             );
 
@@ -1170,10 +1186,15 @@ mod unit_tests {
                 .with_total_size(4096)
                 .with_block_size(32)
                 .with_num_of_way(4);
+            let l2_cache_config = GeneralCacheConfig::new("L2$".to_string())
+                .with_total_size(16384)
+                .with_block_size(64)
+                .with_num_of_way(4);
             let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(
                 entry_pc,
                 l1i_cache_config,
                 l1d_cache_config,
+                l2_cache_config,
                 &mem,
             );
 

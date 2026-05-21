@@ -6,8 +6,6 @@ pub mod statistic; // utils of statistics for cache
 use super::super::statistic::Statistic;
 use crate::hardware::clock::Clocked;
 use crate::hardware::mem::abstract_mem::*;
-use crate::hardware::mem::simple_mem::SimpleMem;
-
 use cache_set::GeneralCacheSetUnit;
 use replacement_policy::ReplacementPolicy;
 use statistic::StatisticInfo;
@@ -78,7 +76,7 @@ enum StatesForOutMemReq {
     WaitForComplete(MemoryReqType),
 }
 
-pub struct GeneralCache<RP: ReplacementPolicy> {
+pub struct GeneralCache<RP: ReplacementPolicy, M: AbstractMemoryInterface> {
     // configuration metadata
     offset_bit_width: usize,
     index_bit_width: usize,
@@ -91,7 +89,7 @@ pub struct GeneralCache<RP: ReplacementPolicy> {
     // The `Rc<_>` wrapping is for shared ownership
     // because SimpleMem might be shared simultaneously by I$ and D$.
     // The `RefCell<_>` wrapping is for mutability because cache might perform write-back
-    mem_ref: Rc<RefCell<SimpleMem>>,
+    mem_ref: Rc<RefCell<M>>,
 
     // pending access request for GeneralCache
     pending_req: Option<MemoryReqType>,
@@ -102,10 +100,10 @@ pub struct GeneralCache<RP: ReplacementPolicy> {
     pub hpm: StatisticInfo,
 }
 
-impl<RP: ReplacementPolicy> GeneralCache<RP> {
+impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> GeneralCache<RP, M> {
     // public methods
     /// only constructor for GeneralCache
-    pub fn new(config: GeneralCacheConfig, mem_ref: Rc<RefCell<SimpleMem>>) -> Self {
+    pub fn new(config: GeneralCacheConfig, mem_ref: Rc<RefCell<M>>) -> Self {
         let num_set =
             config.total_size.unwrap() / (config.block_size.unwrap() * config.num_of_way.unwrap());
         GeneralCache {
@@ -138,7 +136,7 @@ impl<RP: ReplacementPolicy> GeneralCache<RP> {
     }
 }
 
-impl<RP: ReplacementPolicy> AbstractMemoryInterface for GeneralCache<RP> {
+impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> AbstractMemoryInterface for GeneralCache<RP, M> {
     fn try_register_req(&mut self, req: &MemoryReqType) -> Result<(), ()> {
         // check address alignment
         let mut alignment_check: bool = true;
@@ -181,7 +179,7 @@ impl<RP: ReplacementPolicy> AbstractMemoryInterface for GeneralCache<RP> {
     }
 }
 
-impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
+impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache<RP, M> {
     /// tick function which is called in every cycles
     fn tick(&mut self) {
         match self.fsm {
@@ -378,9 +376,10 @@ impl<RP: ReplacementPolicy> Clocked for GeneralCache<RP> {
     }
 }
 
-impl<RP> Statistic for GeneralCache<RP>
+impl<RP, M> Statistic for GeneralCache<RP, M>
 where
     RP: ReplacementPolicy,
+    M: AbstractMemoryInterface,
 {
     type StatisticInfo = statistic::StatisticInfo;
     fn get_statistic_info(&self) -> Self::StatisticInfo {
@@ -403,7 +402,7 @@ mod unit_tests {
 
     use rand::Rng;
 
-    fn initialize_system() -> (GeneralCache<FifoRP>, Rc<RefCell<SimpleMem>>) {
+    fn initialize_system() -> (GeneralCache<FifoRP, SimpleMem>, Rc<RefCell<SimpleMem>>) {
         let mut rng = rand::rng();
         let mut random_init_data = vec![0u8; 0x10000];
         for i in 0..0x10000 {
@@ -415,7 +414,7 @@ mod unit_tests {
             .with_total_size(4096)
             .with_block_size(32)
             .with_num_of_way(2);
-        let cache = GeneralCache::<FifoRP>::new(cache_config, Rc::clone(&mem));
+        let cache = GeneralCache::<FifoRP, SimpleMem>::new(cache_config, Rc::clone(&mem));
         (cache, mem)
     }
 

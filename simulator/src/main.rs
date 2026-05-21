@@ -62,15 +62,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .with_total_size(2048)
                 .with_block_size(32)
                 .with_num_of_way(4);
-            let l1d_cache_config = GeneralCacheConfig::new("L1-I$".to_string())
+            let l1d_cache_config = GeneralCacheConfig::new("L1-D$".to_string())
                 .with_total_size(256)
                 .with_block_size(block_size)
                 .with_num_of_way(2);
+            let l2_cache_config = GeneralCacheConfig::new("L2$".to_string())
+                .with_total_size(16384)
+                .with_block_size(64)
+                .with_num_of_way(4);
             let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body.clone())));
             let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(
                 entry_pc,
                 l1i_cache_config,
                 l1d_cache_config,
+                l2_cache_config,
                 &mem,
             );
 
