@@ -16,7 +16,7 @@ use replacement_policy::ReplacementPolicy;
 use statistic::StatisticInfo;
 use write_policy::WritePolicy;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -84,13 +84,13 @@ enum MainStates {
     /// Used by write-through policies after a store hit: the cache copy
     /// has already been updated; this state drives the same store to the
     /// next-level memory. When the next-level store completes we mark
-    /// the original requester's `done` cell and return to Idle.
-    WriteThroughCommit(StatesForOutMemReq, Rc<Cell<bool>>),
+    /// the original request complete and return to Idle.
+    WriteThroughCommit(StatesForOutMemReq, MemoryReqType),
     /// Used by no-write-allocate policies on a store miss: the cache
     /// stays untouched and the store goes straight to the next level.
-    /// On completion we mark the original requester's `done` and return
+    /// On completion we mark the original request complete and return
     /// to Idle.
-    WriteAround(StatesForOutMemReq, Rc<Cell<bool>>),
+    WriteAround(StatesForOutMemReq, MemoryReqType),
 }
 
 /// States of secondary FSM to handling memory requests to next-level memory.
@@ -219,7 +219,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> AbstractMemoryInterface
                 // Synchronous-hit pre-tick.
                 //
                 // External contract: a cache hit completes in the SAME cycle
-                // as the call to `try_register_req`, i.e. `req.done == true`
+                // as the call to `try_register_req`, i.e. `req.is_done() == true`
                 // returns to the caller before this method returns.
                 //
                 // Internal model: the FSM normally needs two ticks to do that
@@ -261,12 +261,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
             {
                 let addr = self.prefetch_queue.pop_front().unwrap();
                 let len = self.block_size_bytes;
-                let synthetic = MemoryReqType::Load(MemoryLoadReq {
-                    addr,
-                    len,
-                    buffer: Rc::new(RefCell::new(vec![0u8; len].into_boxed_slice())),
-                    done: Rc::new(Cell::new(false)),
-                });
+                let synthetic = MemoryReqType::load(addr, len);
                 self.prefetch_in_flight = true;
                 self.hpm.prefetch_issued_cnt += 1;
                 self.fsm = MainStates::Lookup(synthetic);
@@ -313,17 +308,16 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                         // handle read or write to the cache
                         match req {
                             MemoryReqType::Load(load_req) => {
-                                load_req.buffer.borrow_mut().clone_from_slice(
+                                load_req.complete_from_slice(
                                     &read_block[offset..(offset + req.get_len())],
                                 );
-                                load_req.done.set(true);
                                 if !is_prefetch {
                                     self.hpm.load(false); // update HPM
                                 }
                             }
                             MemoryReqType::Store(store_req) => {
                                 read_block[offset..(offset + req.get_len())]
-                                    .clone_from_slice(&*store_req.store_data);
+                                    .clone_from_slice(store_req.data());
                                 if !is_prefetch {
                                     self.hpm.store(false); // update HPM
                                 }
@@ -332,24 +326,17 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                                     // memory after the propagate
                                     // completes).
                                     self.set[index].write_block_clean(way_index, &read_block);
-                                    let propagate = MemoryStoreReq {
-                                        addr: req.get_addr(),
-                                        len: req.get_len(),
-                                        store_data: store_req.store_data.clone(),
-                                        done: Rc::new(Cell::new(false)),
-                                    };
-                                    let caller_done = store_req.done.clone();
+                                    let propagate =
+                                        MemoryReqType::store(req.get_addr(), store_req.data());
                                     next_state = Some(MainStates::WriteThroughCommit(
-                                        StatesForOutMemReq::SendReq(MemoryReqType::Store(
-                                            propagate,
-                                        )),
-                                        caller_done,
+                                        StatesForOutMemReq::SendReq(propagate),
+                                        req.clone(),
                                     ));
                                 } else {
                                     // Write-back: dirty the cache, ack
                                     // the requester immediately.
                                     self.set[index].write_block(way_index, &read_block);
-                                    store_req.done.set(true);
+                                    store_req.complete();
                                 }
                             }
                         }
@@ -373,17 +360,10 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                             // No-write-allocate: a store miss bypasses
                             // the cache entirely. Send the store to the
                             // next level and skip allocation.
-                            let store_req = req.get_store_req_ref();
-                            let propagate = MemoryStoreReq {
-                                addr: store_req.addr,
-                                len: store_req.len,
-                                store_data: store_req.store_data.clone(),
-                                done: Rc::new(Cell::new(false)),
-                            };
-                            let caller_done = store_req.done.clone();
+                            let propagate = MemoryReqType::store(req.get_addr(), req.store_data());
                             self.fsm = MainStates::WriteAround(
-                                StatesForOutMemReq::SendReq(MemoryReqType::Store(propagate)),
-                                caller_done,
+                                StatesForOutMemReq::SendReq(propagate),
+                                req.clone(),
                             );
                         } else {
                             // store current req to self.backup_req
@@ -401,18 +381,12 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                                 let old_dirty_data = self.set[index].read_block(evict_way);
 
                                 // construct MemoryReqType::Store
-                                let write_back_store_req = MemoryStoreReq {
-                                    addr: write_back_addr,
-                                    len: old_dirty_data.len(),
-                                    store_data: old_dirty_data,
-                                    done: Rc::new(Cell::new(false)),
-                                };
+                                let write_back_store_req =
+                                    MemoryReqType::store(write_back_addr, old_dirty_data);
 
                                 // transfer self.fsm to WriteBack
                                 self.fsm = MainStates::WriteBack(
-                                    StatesForOutMemReq::SendReq(MemoryReqType::Store(
-                                        write_back_store_req,
-                                    )),
+                                    StatesForOutMemReq::SendReq(write_back_store_req),
                                     evict_way,
                                 );
                             } else {
@@ -424,20 +398,12 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                                 let allocate_len = 2usize.pow(self.offset_bit_width as u32);
 
                                 // construct MemoryReqType::Load
-                                let allocate_read_req = MemoryLoadReq {
-                                    addr: allocate_addr,
-                                    len: allocate_len,
-                                    buffer: Rc::new(RefCell::new(
-                                        vec![0u8; allocate_len].into_boxed_slice(),
-                                    )),
-                                    done: Rc::new(Cell::new(false)),
-                                };
+                                let allocate_read_req =
+                                    MemoryReqType::load(allocate_addr, allocate_len);
 
                                 // transfer self.fsm to Allocate
                                 self.fsm = MainStates::Allocate(
-                                    StatesForOutMemReq::SendReq(MemoryReqType::Load(
-                                        allocate_read_req,
-                                    )),
+                                    StatesForOutMemReq::SendReq(allocate_read_req),
                                     evict_way,
                                 );
                             }
@@ -481,23 +447,15 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
 
                     // wait for the write request to next-level memory to be completed
                     StatesForOutMemReq::WaitForComplete(ref req) => {
-                        let store_req = req.get_store_req_ref();
-                        if store_req.done.get() {
+                        if req.is_done() {
                             // prepare for allocate
                             let allocate_addr = self.backup_req.as_ref().unwrap().get_addr()
                                 & !((1 << self.offset_bit_width) - 1);
                             let allocate_len = 2usize.pow(self.offset_bit_width as u32);
-                            let allocate_req = MemoryLoadReq {
-                                addr: allocate_addr,
-                                len: allocate_len,
-                                done: Rc::new(Cell::new(false)),
-                                buffer: Rc::new(RefCell::new(
-                                    vec![0u8; allocate_len].into_boxed_slice(),
-                                )),
-                            };
+                            let allocate_req = MemoryReqType::load(allocate_addr, allocate_len);
                             // transfer to allocate state, and reset self.second_state
                             self.fsm = MainStates::Allocate(
-                                StatesForOutMemReq::SendReq(MemoryReqType::Load(allocate_req)),
+                                StatesForOutMemReq::SendReq(allocate_req),
                                 *evict_way,
                             );
                         }
@@ -516,13 +474,9 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                         }
                     }
                     StatesForOutMemReq::WaitForComplete(ref req) => {
-                        let load_req = req.get_load_req_ref();
-                        if load_req.done.get() {
+                        if req.is_done() {
                             // get load data
-                            let mut load_data: Vec<u8> = Vec::new();
-                            for i in 0..load_req.len {
-                                load_data.push(load_req.buffer.borrow()[i]);
-                            }
+                            let load_data = req.load_data();
 
                             // "insert" (not write) load data into cache set
                             let (new_tag, index, _) =
@@ -548,7 +502,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
 
             // * write-through commit: drive the propagated store to the
             //   next level of memory. When it completes, ack the caller.
-            MainStates::WriteThroughCommit(ref mut second_state, ref caller_done) => {
+            MainStates::WriteThroughCommit(ref mut second_state, ref caller_req) => {
                 let mut completed = false;
                 match second_state {
                     StatesForOutMemReq::SendReq(ref req) => {
@@ -557,8 +511,8 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                         }
                     }
                     StatesForOutMemReq::WaitForComplete(ref req) => {
-                        if req.get_done() {
-                            caller_done.set(true);
+                        if req.is_done() {
+                            caller_req.complete_store();
                             completed = true;
                         }
                     }
@@ -570,7 +524,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
 
             // * write-around: send the bypassing store to the next level
             //   and, when it completes, ack the caller.
-            MainStates::WriteAround(ref mut second_state, ref caller_done) => {
+            MainStates::WriteAround(ref mut second_state, ref caller_req) => {
                 let mut completed = false;
                 match second_state {
                     StatesForOutMemReq::SendReq(ref req) => {
@@ -579,8 +533,8 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                         }
                     }
                     StatesForOutMemReq::WaitForComplete(ref req) => {
-                        if req.get_done() {
-                            caller_done.set(true);
+                        if req.is_done() {
+                            caller_req.complete_store();
                             completed = true;
                         }
                     }
@@ -636,18 +590,8 @@ mod unit_tests {
     fn allocate_without_write_back() {
         let (mut cache, mem) = initialize_system();
 
-        let read_req_for_cache = MemoryReqType::Load(MemoryLoadReq {
-            addr: 100,
-            len: 4,
-            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
-            done: Rc::new(Cell::new(false)),
-        });
-        let read_req_for_mem = MemoryReqType::Load(MemoryLoadReq {
-            addr: 100,
-            len: 4,
-            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
-            done: Rc::new(Cell::new(false)),
-        });
+        let read_req_for_cache = MemoryReqType::load(100, 4);
+        let read_req_for_mem = MemoryReqType::load(100, 4);
 
         if cache.try_register_req(&read_req_for_cache).is_err() {
             panic!();
@@ -660,18 +604,15 @@ mod unit_tests {
             panic!();
         };
 
-        while !read_req_for_cache.get_load_req_ref().done.get()
-            || !read_req_for_mem.get_load_req_ref().done.get()
-        {
+        while !read_req_for_cache.is_done() || !read_req_for_mem.is_done() {
             mem.borrow_mut().tick();
             cache.tick();
         }
 
+        let cache_data = read_req_for_cache.load_data();
+        let mem_data = read_req_for_mem.load_data();
         for i in 0..4 {
-            assert_eq!(
-                read_req_for_cache.get_load_req_ref().buffer.borrow()[i],
-                read_req_for_mem.get_load_req_ref().buffer.borrow()[i]
-            );
+            assert_eq!(cache_data[i], mem_data[i]);
         }
     }
 
@@ -687,32 +628,22 @@ mod unit_tests {
 
         // 4 consecutive read accesses to the cache
         for i in 0..4 {
-            let read_req = MemoryReqType::Load(MemoryLoadReq {
-                addr: 0 + block_size * num_set * i,
-                len: 4,
-                buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
-                done: Rc::new(Cell::new(false)),
-            });
+            let read_req = MemoryReqType::load(block_size * num_set * i, 4);
             if cache.try_register_req(&read_req).is_err() {
                 panic!();
             }
-            while !read_req.get_load_req_ref().done.get() {
+            while !read_req.is_done() {
                 cache.tick();
                 mem.borrow_mut().tick();
             }
         }
 
         // 1 write access to make a dirty block in the cache
-        let write_req = MemoryReqType::Store(MemoryStoreReq {
-            addr: 0,
-            len: 4,
-            store_data: vec![116u8; 4].into_boxed_slice(),
-            done: Rc::new(Cell::new(false)),
-        });
+        let write_req = MemoryReqType::store(0, vec![116u8; 4]);
         if cache.try_register_req(&write_req).is_err() {
             panic!();
         }
-        while !write_req.get_store_req_ref().done.get() {
+        while !write_req.is_done() {
             cache.tick();
             mem.borrow_mut().tick();
         }
@@ -721,17 +652,12 @@ mod unit_tests {
         // 1 read access to the different memory location
         // while the location is mapped to the same set in the cache
         // This read access causes to the write-back operation
-        let read_req = MemoryReqType::Load(MemoryLoadReq {
-            addr: 0 + block_size * num_set * 4,
-            len: 4,
-            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
-            done: Rc::new(Cell::new(false)),
-        });
+        let read_req = MemoryReqType::load(block_size * num_set * 4, 4);
         let mut ever_been_write_back_state = false;
         if cache.try_register_req(&read_req).is_err() {
             panic!();
         }
-        while !read_req.get_load_req_ref().done.get() {
+        while !read_req.is_done() {
             cache.tick();
             mem.borrow_mut().tick();
 
@@ -745,19 +671,14 @@ mod unit_tests {
         );
 
         // read the data has been written back to mem and check the values
-        let read_req = MemoryReqType::Load(MemoryLoadReq {
-            addr: 0,
-            len: 4,
-            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
-            done: Rc::new(Cell::new(false)),
-        });
+        let read_req = MemoryReqType::load(0, 4);
         if mem.borrow_mut().try_register_req(&read_req).is_err() {
             panic!();
         }
-        while !read_req.get_load_req_ref().done.get() {
+        while !read_req.is_done() {
             mem.borrow_mut().tick();
         }
-        for item in read_req.get_load_req_ref().buffer.borrow().iter() {
+        for item in read_req.load_data().iter() {
             assert_eq!(*item, 116);
         }
     }
@@ -774,16 +695,11 @@ mod unit_tests {
             .with_miss_penalty(miss_penalty_cycles);
         let mut cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));
 
-        let req = MemoryReqType::Load(MemoryLoadReq {
-            addr: 0,
-            len: 4,
-            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
-            done: Rc::new(Cell::new(false)),
-        });
+        let req = MemoryReqType::load(0, 4);
         cache.try_register_req(&req).expect("register req");
 
         let mut ticks = 0usize;
-        while !req.get_load_req_ref().done.get() {
+        while !req.is_done() {
             cache.tick();
             mem.borrow_mut().tick();
             ticks += 1;
@@ -817,10 +733,10 @@ mod unit_tests {
     fn run_until_done<M: AbstractMemoryInterface>(
         cache: &mut GeneralCache<FifoRP, M>,
         mem: &Rc<RefCell<M>>,
-        done: &Rc<Cell<bool>>,
+        req: &MemoryReqType,
     ) {
         for _ in 0..10_000 {
-            if done.get() {
+            if req.is_done() {
                 return;
             }
             cache.tick();
@@ -836,17 +752,12 @@ mod unit_tests {
             .expect("valid cache config")
             .with_miss_penalty(1);
         let mut cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));
-        let upper_cache_fill = MemoryReqType::Load(MemoryLoadReq {
-            addr: 0,
-            len: 32,
-            buffer: Rc::new(RefCell::new(vec![0u8; 32].into_boxed_slice())),
-            done: Rc::new(Cell::new(false)),
-        });
+        let upper_cache_fill = MemoryReqType::load(0, 32);
 
         cache
             .try_register_req(&upper_cache_fill)
             .expect("register upper cache block transfer");
-        run_until_done(&mut cache, &mem, &upper_cache_fill.get_load_req_ref().done);
+        run_until_done(&mut cache, &mem, &upper_cache_fill);
     }
 
     /// Build a cache configured with the given write policy, backed by a
@@ -872,29 +783,19 @@ mod unit_tests {
         let (mut cache, mem) =
             build_cache_with_policy(write_policy::WritePolicy::WriteThroughWriteAllocate);
 
-        let store = MemoryReqType::Store(MemoryStoreReq {
-            addr: 0x40,
-            len: 4,
-            store_data: vec![0xAB, 0xCD, 0xEF, 0x12].into_boxed_slice(),
-            done: Rc::new(Cell::new(false)),
-        });
+        let store = MemoryReqType::store(0x40, vec![0xAB, 0xCD, 0xEF, 0x12]);
         cache.try_register_req(&store).expect("register store");
-        run_until_done(&mut cache, &mem, &store.get_store_req_ref().done);
+        run_until_done(&mut cache, &mem, &store);
 
         // Read straight from memory and assert the bytes match.
-        let probe = MemoryReqType::Load(MemoryLoadReq {
-            addr: 0x40,
-            len: 4,
-            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
-            done: Rc::new(Cell::new(false)),
-        });
+        let probe = MemoryReqType::load(0x40, 4);
         mem.borrow_mut()
             .try_register_req(&probe)
             .expect("register mem probe");
-        while !probe.get_load_req_ref().done.get() {
+        while !probe.is_done() {
             mem.borrow_mut().tick();
         }
-        let buf = probe.get_load_req_ref().buffer.borrow();
+        let buf = probe.load_data();
         assert_eq!(buf[0], 0xAB);
         assert_eq!(buf[1], 0xCD);
         assert_eq!(buf[2], 0xEF);
@@ -908,24 +809,14 @@ mod unit_tests {
         let (mut cache, mem) =
             build_cache_with_policy(write_policy::WritePolicy::WriteBackNoWriteAllocate);
 
-        let store = MemoryReqType::Store(MemoryStoreReq {
-            addr: 0x80,
-            len: 4,
-            store_data: vec![0x11, 0x22, 0x33, 0x44].into_boxed_slice(),
-            done: Rc::new(Cell::new(false)),
-        });
+        let store = MemoryReqType::store(0x80, vec![0x11, 0x22, 0x33, 0x44]);
         cache.try_register_req(&store).expect("register store");
-        run_until_done(&mut cache, &mem, &store.get_store_req_ref().done);
+        run_until_done(&mut cache, &mem, &store);
 
         let before_load = cache.hpm.load_miss_cnt;
-        let load = MemoryReqType::Load(MemoryLoadReq {
-            addr: 0x80,
-            len: 4,
-            buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
-            done: Rc::new(Cell::new(false)),
-        });
+        let load = MemoryReqType::load(0x80, 4);
         cache.try_register_req(&load).expect("register load");
-        run_until_done(&mut cache, &mem, &load.get_load_req_ref().done);
+        run_until_done(&mut cache, &mem, &load);
         // Same address ⇒ load should miss because the store did not
         // allocate; the load_miss counter must have advanced.
         assert!(
@@ -933,7 +824,7 @@ mod unit_tests {
             "expected load miss after no-write-allocate store"
         );
         // And the loaded value must equal what the bypassed store wrote.
-        let buf = load.get_load_req_ref().buffer.borrow();
+        let buf = load.load_data();
         assert_eq!(buf[0], 0x11);
         assert_eq!(buf[1], 0x22);
         assert_eq!(buf[2], 0x33);
@@ -960,12 +851,7 @@ mod unit_tests {
         let mut cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));
 
         for i in 0..n_blocks {
-            let req = MemoryReqType::Load(MemoryLoadReq {
-                addr: i * block_size,
-                len: 4,
-                buffer: Rc::new(RefCell::new(vec![0u8; 4].into_boxed_slice())),
-                done: Rc::new(Cell::new(false)),
-            });
+            let req = MemoryReqType::load(i * block_size, 4);
             // Retry registration until the FSM is Idle. While a prefetch
             // from the previous demand access is in flight we'll get
             // Err — keep ticking so the prefetch can drain.
@@ -973,7 +859,7 @@ mod unit_tests {
                 cache.tick();
                 mem.borrow_mut().tick();
             }
-            run_until_done(&mut cache, &mem, &req.get_load_req_ref().done);
+            run_until_done(&mut cache, &mem, &req);
 
             // Give the just-queued prefetch a chance to complete before
             // the next demand access closes the window. Without this,

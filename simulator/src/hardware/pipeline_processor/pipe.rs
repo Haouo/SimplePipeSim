@@ -12,7 +12,7 @@ use super::statistic;
 use super::{decode, execute};
 use crate::hardware::mem::general_cache::GeneralCacheConfig;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 #[derive(Default)]
@@ -153,12 +153,7 @@ where
     fn pipe_stage_fetch(&mut self) {
         match self.if_fsm {
             PipelineMemoryFSM::Idle => {
-                let new_req = MemoryReqType::Load(MemoryLoadReq {
-                    addr: self.if_pc,
-                    len: 4,
-                    done: Rc::new(Cell::new(false)),
-                    buffer: Rc::new(RefCell::from(vec![0u8; 4].into_boxed_slice())),
-                });
+                let new_req = MemoryReqType::load(self.if_pc, 4);
                 if self.icache.try_register_req(&new_req).is_err() {
                     self.if_fsm = PipelineMemoryFSM::SendingReq(new_req);
                     return;
@@ -166,13 +161,14 @@ where
 
                 // succesfully register new request to icache
                 // check whether it is hit in the current cycle
-                if new_req.get_done() == false {
+                if new_req.is_done() == false {
                     self.if_fsm = PipelineMemoryFSM::WaitingComplete(new_req);
                     return;
                 }
 
                 // get data in the current cycle
-                let load_data_arr: [u8; 4] = new_req.get_load_req_ref().buffer.borrow()[0..=3]
+                let load_bytes = new_req.load_data();
+                let load_data_arr: [u8; 4] = load_bytes[0..=3]
                     .try_into()
                     .expect("The length of fetched inst. in IF Stage should be 4!");
                 let load_data = u32::from_le_bytes(load_data_arr);
@@ -182,26 +178,28 @@ where
                 if self.icache.try_register_req(new_req).is_err() {
                     return;
                 }
-                if new_req.get_done() == false {
+                if new_req.is_done() == false {
                     // need to wait for icache
                     self.if_fsm = PipelineMemoryFSM::WaitingComplete(new_req.clone());
                     return;
                 }
 
                 // get data in the current cycle
-                let load_data_arr: [u8; 4] = new_req.get_load_req_ref().buffer.borrow()[0..=3]
+                let load_bytes = new_req.load_data();
+                let load_data_arr: [u8; 4] = load_bytes[0..=3]
                     .try_into()
                     .expect("The length of fetched inst. in IF Stage should be 4!");
                 let load_data = u32::from_le_bytes(load_data_arr);
                 self.if_raw_isnt_buffer = Some(load_data);
             }
             PipelineMemoryFSM::WaitingComplete(ref inflight_req) => {
-                if inflight_req.get_done() == false {
+                if inflight_req.is_done() == false {
                     return;
                 }
 
                 // get data in the current cycle
-                let load_data_arr: [u8; 4] = inflight_req.get_load_req_ref().buffer.borrow()[0..=3]
+                let load_bytes = inflight_req.load_data();
+                let load_data_arr: [u8; 4] = load_bytes[0..=3]
                     .try_into()
                     .expect("The length of fetched inst. in IF Stage should be 4!");
                 let load_data = u32::from_le_bytes(load_data_arr);
@@ -403,23 +401,12 @@ where
                         self.mem_access_length_buffer = Some(access_length);
 
                         let new_req = if current_op.is_store {
-                            MemoryReqType::Store(MemoryStoreReq {
-                                addr: current_op.alu_result,
-                                len: access_length,
-                                store_data: Box::from(
-                                    &current_op.rs2.unwrap().1.to_le_bytes()[0..access_length],
-                                ),
-                                done: Rc::new(Cell::new(false)),
-                            })
+                            MemoryReqType::store(
+                                current_op.alu_result,
+                                current_op.rs2.unwrap().1.to_le_bytes()[0..access_length].to_vec(),
+                            )
                         } else {
-                            MemoryReqType::Load(MemoryLoadReq {
-                                addr: current_op.alu_result,
-                                len: access_length,
-                                done: Rc::new(Cell::new(false)),
-                                buffer: Rc::new(RefCell::new(
-                                    vec![0u8; access_length].into_boxed_slice(),
-                                )),
-                            })
+                            MemoryReqType::load(current_op.alu_result, access_length)
                         };
                         if self.dcache.try_register_req(&new_req).is_err() {
                             self.mem_fsm = PipelineMemoryFSM::SendingReq(new_req);
@@ -428,16 +415,15 @@ where
 
                         // register new request to dcache successfully
                         // check whether it is hit
-                        if new_req.get_done() == false {
+                        if new_req.is_done() == false {
                             self.mem_fsm = PipelineMemoryFSM::WaitingComplete(new_req);
                             return;
                         }
                         // cache hit at the current cycle
                         if current_op.is_store == false {
                             // for load inst.
-                            let mut tmp_vec =
-                                vec![0u8; self.mem_access_length_buffer.take().unwrap()];
-                            tmp_vec.clone_from_slice(&*new_req.get_load_req_ref().buffer.borrow());
+                            self.mem_access_length_buffer.take().unwrap();
+                            let tmp_vec = new_req.load_data();
                             let mut load_data = 0u32;
                             for (idx, a_byte) in tmp_vec.iter().enumerate() {
                                 load_data += (*a_byte as u32) << (8 * idx);
@@ -454,15 +440,15 @@ where
 
                 // register new request to dcache successfully
                 // check whether it is hit
-                if new_req.get_done() == false {
+                if new_req.is_done() == false {
                     self.mem_fsm = PipelineMemoryFSM::WaitingComplete(new_req.clone());
                     return;
                 }
                 // cache hit at the current cycle
                 if self.mem_op.as_ref().unwrap().is_store == false {
                     // for load inst.
-                    let mut tmp_vec = vec![0u8; self.mem_access_length_buffer.take().unwrap()];
-                    tmp_vec.clone_from_slice(&*new_req.get_load_req_ref().buffer.borrow());
+                    self.mem_access_length_buffer.take().unwrap();
+                    let tmp_vec = new_req.load_data();
                     let mut load_data = 0u32;
                     for (idx, a_byte) in tmp_vec.iter().enumerate() {
                         load_data += (*a_byte as u32) << (8 * idx);
@@ -471,14 +457,14 @@ where
                 }
             }
             PipelineMemoryFSM::WaitingComplete(ref inflight_req) => {
-                if inflight_req.get_done() == false {
+                if inflight_req.is_done() == false {
                     return;
                 }
                 // cache hit at the current cycle
                 if self.mem_op.as_ref().unwrap().is_store == false {
                     // for load inst.
-                    let mut tmp_vec = vec![0u8; self.mem_access_length_buffer.take().unwrap()];
-                    tmp_vec.clone_from_slice(&*inflight_req.get_load_req_ref().buffer.borrow());
+                    self.mem_access_length_buffer.take().unwrap();
+                    let tmp_vec = inflight_req.load_data();
                     let mut load_data = 0u32;
                     for (idx, a_byte) in tmp_vec.iter().enumerate() {
                         load_data += (*a_byte as u32) << (8 * idx);

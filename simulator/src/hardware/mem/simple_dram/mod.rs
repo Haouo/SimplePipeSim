@@ -129,11 +129,9 @@ impl SimpleDram {
             .pending_req
             .take()
             .expect("complete_pending_read called with no pending request");
-        let load = req.get_load_req_ref();
-        for i in 0..load.len {
-            load.buffer.borrow_mut()[i] = self.data[load.addr as usize + i];
-        }
-        load.done.set(true);
+        let addr = req.get_addr() as usize;
+        let len = req.get_len();
+        req.complete_load_from_slice(&self.data[addr..(addr + len)]);
         self.pending_req_required_activate = false;
     }
 
@@ -142,11 +140,10 @@ impl SimpleDram {
             .pending_req
             .take()
             .expect("complete_pending_write called with no pending request");
-        let store = req.get_store_req_ref();
-        for i in 0..store.len {
-            self.data[store.addr as usize + i] = store.store_data[i];
-        }
-        store.done.set(true);
+        let addr = req.get_addr() as usize;
+        let len = req.get_len();
+        self.data[addr..(addr + len)].clone_from_slice(req.store_data());
+        req.complete_store();
         self.pending_req_required_activate = false;
     }
 }
@@ -248,9 +245,6 @@ impl Clocked for SimpleDram {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
-    use std::cell::{Cell, RefCell};
-    use std::rc::Rc;
-
     fn build_dram(row_size: usize) -> SimpleDram {
         SimpleDram::new(vec![0u8; 0x10000], DramTiming::educational_default())
             .with_row_size(row_size)
@@ -261,12 +255,8 @@ mod unit_tests {
     /// completes within a generous safety budget.
     fn run_to_completion(dram: &mut SimpleDram, req: &MemoryReqType) -> usize {
         dram.try_register_req(req).expect("register request");
-        let done_cell = match req {
-            MemoryReqType::Load(l) => l.done.clone(),
-            MemoryReqType::Store(s) => s.done.clone(),
-        };
         let mut cycles = 0usize;
-        while !done_cell.get() {
+        while !req.is_done() {
             dram.tick();
             cycles += 1;
             assert!(
@@ -278,21 +268,11 @@ mod unit_tests {
     }
 
     fn make_load(addr: u32, len: usize) -> MemoryReqType {
-        MemoryReqType::Load(MemoryLoadReq {
-            addr,
-            len,
-            buffer: Rc::new(RefCell::new(vec![0u8; len].into_boxed_slice())),
-            done: Rc::new(Cell::new(false)),
-        })
+        MemoryReqType::load(addr, len)
     }
 
     fn make_store(addr: u32, data: Vec<u8>) -> MemoryReqType {
-        MemoryReqType::Store(MemoryStoreReq {
-            addr,
-            len: data.len(),
-            store_data: data.into_boxed_slice(),
-            done: Rc::new(Cell::new(false)),
-        })
+        MemoryReqType::store(addr, data)
     }
 
     #[test]
@@ -345,7 +325,7 @@ mod unit_tests {
         run_to_completion(&mut d, &s);
         let l = make_load(0x40, 4);
         run_to_completion(&mut d, &l);
-        let buf = l.get_load_req_ref().buffer.borrow();
+        let buf = l.load_data();
         assert_eq!(&buf[..], &[0xDE, 0xAD, 0xBE, 0xEF]);
     }
 

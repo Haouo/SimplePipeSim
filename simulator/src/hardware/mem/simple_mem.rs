@@ -79,18 +79,15 @@ impl Clocked for SimpleMem {
 
             // handle inflight request
             let req = self.pending_req.take().unwrap();
-            match req {
-                MemoryReqType::Load(load_req) => {
-                    for i in 0..load_req.len {
-                        load_req.buffer.borrow_mut()[i] = self.data[load_req.addr as usize + i];
-                    }
-                    load_req.done.set(true);
+            let addr = req.get_addr() as usize;
+            let len = req.get_len();
+            match &req {
+                MemoryReqType::Load(_) => {
+                    req.complete_load_from_slice(&self.data[addr..(addr + len)]);
                 }
                 MemoryReqType::Store(store_req) => {
-                    for i in 0..store_req.len {
-                        self.data[store_req.addr as usize + i] = store_req.store_data[i];
-                    }
-                    store_req.done.set(true);
+                    self.data[addr..(addr + len)].clone_from_slice(store_req.data());
+                    req.complete_store();
                 }
             }
         }
@@ -102,9 +99,6 @@ mod unit_tests {
     use super::*;
 
     use rand::Rng;
-    use std::cell::{Cell, RefCell};
-    use std::rc::Rc;
-
     fn random_initialize() -> (SimpleMem, Box<[u8]>) {
         let mut rng = rand::rng();
         let mut init_data = Vec::<u8>::with_capacity(MEM_SIZE);
@@ -138,12 +132,10 @@ mod unit_tests {
                     random_store_data.push(rng.random_range(0..256) as u8);
                 }
 
-                let store_req = MemoryReqType::Store(MemoryStoreReq {
-                    addr: access_start_addr,
-                    len: access_length,
-                    store_data: random_store_data.clone().into_boxed_slice(),
-                    done: Rc::new(Cell::new(false)),
-                });
+                let store_req = MemoryReqType::store(
+                    access_start_addr,
+                    random_store_data.clone().into_boxed_slice(),
+                );
                 if let Err(()) = mem_dut.try_register_req(&store_req) {
                     panic!();
                 }
@@ -151,28 +143,21 @@ mod unit_tests {
                     mem_golden[access_start_addr as usize + i] = random_store_data[i];
                 }
 
-                while !store_req.get_store_req_ref().done.get() {
+                while !store_req.is_done() {
                     mem_dut.tick();
                 }
 
                 // verify the store
-                let load_req = MemoryReqType::Load(MemoryLoadReq {
-                    addr: access_start_addr,
-                    len: access_length,
-                    buffer: Rc::new(RefCell::new(vec![0u8; access_length].into_boxed_slice())),
-                    done: Rc::new(Cell::new(false)),
-                });
+                let load_req = MemoryReqType::load(access_start_addr, access_length);
                 if let Err(()) = mem_dut.try_register_req(&load_req) {
                     panic!();
                 }
-                while !load_req.get_load_req_ref().done.get() {
+                while !load_req.is_done() {
                     mem_dut.tick();
                 }
+                let load_data = load_req.load_data();
                 for i in 0..access_length {
-                    assert_eq!(
-                        load_req.get_load_req_ref().buffer.borrow()[i],
-                        random_store_data[i]
-                    );
+                    assert_eq!(load_data[i], random_store_data[i]);
                 }
             } else {
                 // load
