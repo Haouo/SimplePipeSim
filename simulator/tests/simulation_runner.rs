@@ -22,7 +22,7 @@ fn halt_program() -> ProgramInfo {
 
 #[test]
 fn runner_halts_raw_program_and_reports_hierarchy_stats() {
-    let report = run(halt_program(), SimulationConfig::default());
+    let report = run(halt_program(), SimulationConfig::default()).expect("run simulation");
 
     assert!(report.pipeline.inst_retire >= 1);
     assert!(report.pipeline.total_ticked_cycle > 0);
@@ -45,7 +45,7 @@ fn runner_composes_dram_and_predictor_adapters() {
         ..SimulationConfig::default()
     };
 
-    let report = run(halt_program(), config);
+    let report = run(halt_program(), config).expect("run simulation");
 
     match report.backing_memory {
         BackingMemoryReport::SimpleDram {
@@ -57,4 +57,22 @@ fn runner_composes_dram_and_predictor_adapters() {
         }
         BackingMemoryReport::SimpleMem => panic!("expected DRAM report"),
     }
+}
+
+#[test]
+fn runner_rejects_invalid_cache_geometry_before_controller_construction() {
+    let config = SimulationConfig {
+        l1d: simulator::sim::runner::CacheLevelConfig::new(256, 24, 2, 2),
+        ..SimulationConfig::default()
+    };
+
+    let err = match run(halt_program(), config) {
+        Ok(_) => panic!("invalid cache config should not run"),
+        Err(err) => err,
+    };
+
+    assert_eq!(
+        err.to_string(),
+        "invalid L1-D$ cache config: block size must be a power of two, got 24"
+    );
 }

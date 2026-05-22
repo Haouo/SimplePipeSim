@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::error::Error;
+use std::fmt;
 use std::rc::Rc;
 
 use crate::hardware::branch_predictor::{self, BranchPredict};
@@ -8,7 +10,7 @@ use crate::hardware::mem::general_cache::prefetcher::PrefetcherKind;
 use crate::hardware::mem::general_cache::replacement_policy::{self as rp, ReplacementPolicy};
 use crate::hardware::mem::general_cache::statistic::StatisticInfo as CacheStatisticInfo;
 use crate::hardware::mem::general_cache::write_policy::WritePolicy;
-use crate::hardware::mem::general_cache::GeneralCacheConfig;
+use crate::hardware::mem::general_cache::{GeneralCacheConfig, GeneralCacheConfigError};
 use crate::hardware::mem::simple_dram::{DramTiming, SimpleDram};
 use crate::hardware::mem::simple_mem::SimpleMem;
 use crate::hardware::pipeline_processor::pipe::PipelineProcessor;
@@ -72,14 +74,13 @@ impl CacheLevelConfig {
         name: &str,
         write_policy: WritePolicy,
         prefetcher_kind: PrefetcherKind,
-    ) -> GeneralCacheConfig {
-        GeneralCacheConfig::new(name.to_string())
-            .with_total_size(self.total_size)
-            .with_block_size(self.block_size)
-            .with_num_of_way(self.num_of_way)
-            .with_miss_penalty(self.miss_penalty)
-            .with_write_policy(write_policy)
-            .with_prefetcher_kind(prefetcher_kind)
+    ) -> Result<GeneralCacheConfig, GeneralCacheConfigError> {
+        Ok(
+            GeneralCacheConfig::new(name, self.total_size, self.block_size, self.num_of_way)?
+                .with_miss_penalty(self.miss_penalty)
+                .with_write_policy(write_policy)
+                .with_prefetcher_kind(prefetcher_kind),
+        )
     }
 }
 
@@ -96,15 +97,51 @@ pub struct SimulationConfig {
 }
 
 impl SimulationConfig {
-    fn cache_configs(self) -> (GeneralCacheConfig, GeneralCacheConfig, GeneralCacheConfig) {
-        (
+    fn cache_configs(
+        self,
+    ) -> Result<(GeneralCacheConfig, GeneralCacheConfig, GeneralCacheConfig), SimulationConfigError>
+    {
+        self.validate_replacement_policy()?;
+        Ok((
             self.l1i
-                .into_general_cache_config("L1-I$", self.write_policy, self.prefetcher_kind),
+                .into_general_cache_config("L1-I$", self.write_policy, self.prefetcher_kind)
+                .map_err(|source| SimulationConfigError::Cache {
+                    level: "L1-I$",
+                    source,
+                })?,
             self.l1d
-                .into_general_cache_config("L1-D$", self.write_policy, self.prefetcher_kind),
+                .into_general_cache_config("L1-D$", self.write_policy, self.prefetcher_kind)
+                .map_err(|source| SimulationConfigError::Cache {
+                    level: "L1-D$",
+                    source,
+                })?,
             self.l2
-                .into_general_cache_config("L2$", self.write_policy, self.prefetcher_kind),
-        )
+                .into_general_cache_config("L2$", self.write_policy, self.prefetcher_kind)
+                .map_err(|source| SimulationConfigError::Cache {
+                    level: "L2$",
+                    source,
+                })?,
+        ))
+    }
+
+    fn validate_replacement_policy(self) -> Result<(), SimulationConfigError> {
+        if self.replacement_policy != ReplacementPolicyKind::Plru {
+            return Ok(());
+        }
+
+        for (level, ways) in [
+            ("L1-I$", self.l1i.num_of_way),
+            ("L1-D$", self.l1d.num_of_way),
+            ("L2$", self.l2.num_of_way),
+        ] {
+            if !ways.is_power_of_two() {
+                return Err(SimulationConfigError::PseudoLruAssociativity {
+                    level,
+                    num_of_way: ways,
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -143,7 +180,45 @@ pub struct SimulationReport {
     pub final_registers: [u32; 32],
 }
 
-pub fn run(program: ProgramInfo, config: SimulationConfig) -> SimulationReport {
+#[derive(Debug)]
+pub enum SimulationConfigError {
+    Cache {
+        level: &'static str,
+        source: GeneralCacheConfigError,
+    },
+    PseudoLruAssociativity {
+        level: &'static str,
+        num_of_way: usize,
+    },
+}
+
+impl fmt::Display for SimulationConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cache { level, source } => {
+                write!(f, "invalid {level} cache config: {source}")
+            }
+            Self::PseudoLruAssociativity { level, num_of_way } => write!(
+                f,
+                "invalid {level} replacement config: PLRU associativity must be a power of two, got {num_of_way}"
+            ),
+        }
+    }
+}
+
+impl Error for SimulationConfigError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Cache { source, .. } => Some(source),
+            Self::PseudoLruAssociativity { .. } => None,
+        }
+    }
+}
+
+pub fn run(
+    program: ProgramInfo,
+    config: SimulationConfig,
+) -> Result<SimulationReport, SimulationConfigError> {
     let ProgramInfo {
         entry_pc,
         prog_body,
@@ -166,7 +241,7 @@ fn run_with_policy<RP>(
     entry_pc: u32,
     prog_body: Vec<u8>,
     config: SimulationConfig,
-) -> SimulationReport
+) -> Result<SimulationReport, SimulationConfigError>
 where
     RP: ReplacementPolicy,
 {
@@ -193,14 +268,14 @@ fn run_with_memory<RP, M, F>(
     memory: M,
     config: SimulationConfig,
     memory_report: F,
-) -> SimulationReport
+) -> Result<SimulationReport, SimulationConfigError>
 where
     RP: ReplacementPolicy,
     M: AbstractMemoryInterface,
     F: FnOnce(&M) -> BackingMemoryReport,
 {
     let mem = Rc::new(RefCell::new(memory));
-    let (l1i_cfg, l1d_cfg, l2_cfg) = config.cache_configs();
+    let (l1i_cfg, l1d_cfg, l2_cfg) = config.cache_configs()?;
     let mut cpu = PipelineProcessor::<RP, M>::new_with_predictor(
         entry_pc,
         l1i_cfg,
@@ -221,12 +296,12 @@ where
     };
     let l2 = cpu.l2_cache.borrow().get_statistic_info();
 
-    SimulationReport {
+    Ok(SimulationReport {
         pipeline: cpu.get_statistic_info(),
         l1i: cpu.icache.get_statistic_info(),
         l1d: cpu.dcache.get_statistic_info(),
         l2,
         backing_memory,
         final_registers: cpu.registers(),
-    }
+    })
 }

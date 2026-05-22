@@ -9,15 +9,11 @@ use super::super::mem::general_cache::GeneralCache;
 use super::super::statistic::Statistic;
 use super::super::uop::*;
 use super::statistic;
+use super::{decode, execute};
 use crate::hardware::mem::general_cache::GeneralCacheConfig;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-
-/// Additional stalls for integer MUL instructions
-const MUL_STALL: usize = 8;
-/// Additional stalls for integer DIV/REM instructions
-const DIV_REM_STALL: usize = 32;
 
 #[derive(Default)]
 enum PipelineMemoryFSM {
@@ -291,223 +287,12 @@ where
             return;
         }
 
-        // Stage 1 pre-decoding
-        // generate most of isnt. info. and read data from register file
         if let Some(ref mut current_op) = self.id_op {
-            match current_op.inst {
-                // OP
-                Instruction::Add(inst)
-                | Instruction::Sub(inst)
-                | Instruction::Sll(inst)
-                | Instruction::Slt(inst)
-                | Instruction::Sltu(inst)
-                | Instruction::Xor(inst)
-                | Instruction::Srl(inst)
-                | Instruction::Sra(inst)
-                | Instruction::Or(inst)
-                | Instruction::And(inst)
-                | Instruction::Mul(inst)
-                | Instruction::Mulh(inst)
-                | Instruction::Mulhu(inst)
-                | Instruction::Mulhsu(inst)
-                | Instruction::Div(inst)
-                | Instruction::Divu(inst)
-                | Instruction::Rem(inst)
-                | Instruction::Remu(inst) => {
-                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize])); // read regfile
-                    current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize])); // read regfile
-                    current_op.rd_index = Some(inst.rd());
-                    current_op.alu_result_as_rd_dst_value = true;
-                    current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                    current_op.alu_op2_sel = AluOpTwoSelect::RegRs2;
-                }
-
-                // OP-IMM
-                Instruction::Addi(inst)
-                | Instruction::Slti(inst)
-                | Instruction::Sltiu(inst)
-                | Instruction::Xori(inst)
-                | Instruction::Ori(inst)
-                | Instruction::Andi(inst)
-                | Instruction::Slli(inst)
-                | Instruction::Srli(inst)
-                | Instruction::Srai(inst) => {
-                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize])); // read regfile
-                    current_op.immediate_signext = inst.imm_sign_ext();
-                    current_op.rd_index = Some(inst.rd());
-                    current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                    current_op.alu_result_as_rd_dst_value = true;
-                }
-
-                // LOAD
-                Instruction::Lb(inst)
-                | Instruction::Lh(inst)
-                | Instruction::Lw(inst)
-                | Instruction::Lbu(inst)
-                | Instruction::Lhu(inst) => {
-                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize])); // read regfile
-                    current_op.immediate_signext = inst.imm_sign_ext();
-                    current_op.rd_index = Some(inst.rd());
-                    current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                    current_op.alu_op_type = AluOpTypes::Add; // (rs1 + imm) as memory access addr.
-                    current_op.is_mem = true;
-                }
-
-                // STORE
-                Instruction::Sb(inst) | Instruction::Sh(inst) | Instruction::Sw(inst) => {
-                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                    current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize])); // rs2 -> mem[rs1 + imm]
-                    current_op.immediate_signext = inst.sign_ext();
-                    current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                    current_op.alu_op_type = AluOpTypes::Add; // (rs1 + imm) as memory access addr.
-                    current_op.is_mem = true;
-                    current_op.is_store = true;
-                }
-
-                // Conditional BRANCH
-                Instruction::Beq(inst)
-                | Instruction::Bne(inst)
-                | Instruction::Blt(inst)
-                | Instruction::Bge(inst)
-                | Instruction::Bltu(inst)
-                | Instruction::Bgeu(inst) => {
-                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                    current_op.rs2 = Some((inst.rs2(), self.id_regs[inst.rs2() as usize]));
-                    current_op.immediate_signext = inst.sign_ext();
-                    current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
-                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                    current_op.alu_op_type = AluOpTypes::Add;
-                    current_op.is_branch = true;
-                }
-
-                // JAL
-                Instruction::Jal(inst) => {
-                    current_op.immediate_signext = inst.sign_ext();
-                    current_op.rd_index = Some(inst.rd());
-                    current_op.rd_write_value = Some(current_op.pc + 4); // jump and "link"
-                    current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
-                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                    current_op.alu_op_type = AluOpTypes::Add;
-                    current_op.is_branch = true;
-                }
-                // JALR
-                Instruction::Jalr(inst) => {
-                    current_op.rs1 = Some((inst.rs1(), self.id_regs[inst.rs1() as usize]));
-                    current_op.rd_index = Some(inst.rd());
-                    current_op.rd_write_value = Some(current_op.pc + 4);
-                    current_op.immediate_signext = inst.imm_sign_ext(); // jump and "link"
-                    current_op.alu_op1_sel = AluOpOneSelect::RegRs1;
-                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                    current_op.alu_op_type = AluOpTypes::Add;
-                    current_op.is_branch = true;
-                }
-
-                // LUI
-                Instruction::Lui(inst) => {
-                    current_op.rd_index = Some(inst.rd());
-                    current_op.immediate_signext = inst.sign_ext();
-                    current_op.alu_op1_sel = AluOpOneSelect::Zero;
-                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                    current_op.alu_op_type = AluOpTypes::Add;
-                    current_op.alu_result_as_rd_dst_value = true;
-                }
-
-                // AUIPC
-                Instruction::Auipc(inst) => {
-                    current_op.rd_index = Some(inst.rd());
-                    current_op.immediate_signext = inst.sign_ext();
-                    current_op.alu_op1_sel = AluOpOneSelect::CurrentPc;
-                    current_op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
-                    current_op.alu_op_type = AluOpTypes::Add;
-                    current_op.alu_result_as_rd_dst_value = true;
-                }
-
-                // FENCE
-                Instruction::Fence(_inst) => {
-                    todo!();
-                }
-
-                // SYSTEM
-                Instruction::Ecall(_inst) => {
-                    current_op.is_env_call = true;
-                }
-
-                // We capture illegal instructions in the ID stage and make the program panic.
-                Instruction::Illegal(raw_inst) => panic!(
-                    "Unknown instruction: {:#08X} at PC: {:#x}",
-                    raw_inst, current_op.pc
-                ),
-            }
-
-            // stage 2 pre-decode for OP and OP-IMM OPCODE types
-            // It works mainly on decideing the ALU Operation types
-            match current_op.inst {
-                // Addition
-                Instruction::Add(_) | Instruction::Addi(_) => {
-                    current_op.alu_op_type = AluOpTypes::Add
-                }
-                // Subtraction
-                Instruction::Sub(_) => current_op.alu_op_type = AluOpTypes::Sub,
-                // Shift Left Logically
-                Instruction::Sll(_) | Instruction::Slli(_) => {
-                    current_op.alu_op_type = AluOpTypes::Sll
-                }
-                // Set on Less-than
-                Instruction::Slt(_) | Instruction::Slti(_) => {
-                    current_op.alu_op_type = AluOpTypes::Slt
-                }
-                // Set on Less-than Unsigned
-                Instruction::Sltu(_) | Instruction::Sltiu(_) => {
-                    current_op.alu_op_type = AluOpTypes::Sltu
-                }
-                // Bitwise XOR
-                Instruction::Xor(_) | Instruction::Xori(_) => {
-                    current_op.alu_op_type = AluOpTypes::Xor
-                }
-                // Shift Right Logically
-                Instruction::Srl(_) | Instruction::Srli(_) => {
-                    current_op.alu_op_type = AluOpTypes::Srl
-                }
-                // Shift Right Arithmetically
-                Instruction::Sra(_) | Instruction::Srai(_) => {
-                    current_op.alu_op_type = AluOpTypes::Sra
-                }
-                // Bitwise OR
-                Instruction::Or(_) | Instruction::Ori(_) => current_op.alu_op_type = AluOpTypes::Or,
-                // Bitwise AND
-                Instruction::And(_) | Instruction::Andi(_) => {
-                    current_op.alu_op_type = AluOpTypes::And
-                }
-                // Mul (signed, lower half part)
-                Instruction::Mul(_) => current_op.alu_op_type = AluOpTypes::Mul,
-                // Mul (signed, higher half part)
-                Instruction::Mulh(_) => current_op.alu_op_type = AluOpTypes::Mulh,
-                // Mulhu (unsigned, higher hal part)
-                Instruction::Mulhu(_) => current_op.alu_op_type = AluOpTypes::Mulhu,
-                // Mulhsu (signed * unsigned, higher half part)
-                Instruction::Mulhsu(_) => current_op.alu_op_type = AluOpTypes::Mulhsu,
-                // Div
-                Instruction::Div(_) => current_op.alu_op_type = AluOpTypes::Div,
-                // Div Unsigned
-                Instruction::Divu(_) => current_op.alu_op_type = AluOpTypes::Divu,
-                // Modulo
-                Instruction::Rem(_) => current_op.alu_op_type = AluOpTypes::Rem,
-                // Modulo Unsigned
-                Instruction::Remu(_) => current_op.alu_op_type = AluOpTypes::Remu,
-                _ => {}
-            }
+            decode::decode(current_op, &self.id_regs).unwrap_or_else(|error| panic!("{error}"));
         }
 
         // transfer id_op to exe_op
         self.exe_op = self.id_op.take();
-
-        // **Ps**
-        // In hardware implementation, stage 1 and 2 can be implemented in parallel.
-        // In other words, the hardware decoder can have two parallel decoding path because they are independent logically.
-        // The first performs common decoding logics, and the second performs specific decoding logic for determining ALU OP-Types.
     }
 
     /// ### Instruction Execute Pipeline Stage Function
@@ -536,113 +321,17 @@ where
                 self.mem_op = self.exe_op.take();
                 return;
             }
-            // special actions for M-extension inst.
-            match current_op.inst {
-                Instruction::Mul(_)
-                | Instruction::Mulh(_)
-                | Instruction::Mulhu(_)
-                | Instruction::Mulhsu(_) => {
-                    if self.int_mul_div_stall_countdown.is_none() {
-                        self.int_mul_div_stall_countdown = Some(MUL_STALL);
-                        return;
-                    }
+            if let Some(stall_cycles) = execute::m_extension_stall(current_op.inst) {
+                if self.int_mul_div_stall_countdown.is_none() {
+                    self.int_mul_div_stall_countdown = Some(stall_cycles);
+                    return;
                 }
-                Instruction::Div(_)
-                | Instruction::Divu(_)
-                | Instruction::Rem(_)
-                | Instruction::Remu(_) => {
-                    if self.int_mul_div_stall_countdown.is_none() {
-                        self.int_mul_div_stall_countdown = Some(DIV_REM_STALL);
-                        return;
-                    }
-                }
-                _ => {}
             }
 
-            // preset ALU's op-1 and op-2
-            let op1: u32 = match current_op.alu_op1_sel {
-                AluOpOneSelect::RegRs1 => {
-                    current_op
-                        .rs1
-                        .expect("rs1 of current inst. should not be None!")
-                        .1
-                }
-                AluOpOneSelect::CurrentPc => current_op.pc,
-                AluOpOneSelect::Zero => 0u32,
-            };
-            let op2: u32 = match current_op.alu_op2_sel {
-                AluOpTwoSelect::RegRs2 => {
-                    current_op
-                        .rs2
-                        .expect("rs2 of current inst. should not be None!")
-                        .1
-                }
-                AluOpTwoSelect::ImmSignExt => current_op.immediate_signext,
-            };
-            // perform numerical calculations
-            // !!! TODO: there are problems about signed/unsigned arithmetics !!!
-            match current_op.alu_op_type {
-                AluOpTypes::Add => current_op.alu_result = op1.wrapping_add(op2),
-                AluOpTypes::Sub => current_op.alu_result = op1.wrapping_sub(op2),
-                AluOpTypes::Sll => current_op.alu_result = op1 << (op2 & 0x1f),
-                AluOpTypes::Slt => {
-                    current_op.alu_result = if (op1 as i32) < (op2 as i32) {
-                        1u32
-                    } else {
-                        0u32
-                    }
-                }
-                AluOpTypes::Sltu => current_op.alu_result = if op1 < op2 { 1u32 } else { 0u32 },
-                AluOpTypes::Xor => current_op.alu_result = op1 ^ op2,
-                AluOpTypes::Srl => current_op.alu_result = op1 >> (op2 & 0x1f), // logically (fill zeros on the MSB side)
-                AluOpTypes::Sra => current_op.alu_result = ((op1 as i32) >> (op2 & 0x1f)) as u32, // arithmetically (fill sign-bits on the MSB side)
-                AluOpTypes::Or => current_op.alu_result = op1 | op2,
-                AluOpTypes::And => current_op.alu_result = op1 & op2,
-                AluOpTypes::Mul => {
-                    current_op.alu_result = (((op1 as i32) as i64) * ((op2 as i32) as i64)) as u32;
-                    self.int_mul_div_stall_countdown = None;
-                }
-                AluOpTypes::Mulh => {
-                    current_op.alu_result =
-                        ((((op1 as i32) as i64) * ((op2 as i32) as i64)) >> 32) as u32;
-                    self.int_mul_div_stall_countdown = None;
-                }
-                AluOpTypes::Mulhu => {
-                    current_op.alu_result = ((op1 as u64) * (op2 as u64) >> 32) as u32;
-                    self.int_mul_div_stall_countdown = None;
-                }
-                AluOpTypes::Mulhsu => {
-                    current_op.alu_result = (((op1 as i32) as i64) * (op2 as i64) >> 32) as u32;
-                    self.int_mul_div_stall_countdown = None;
-                }
-                AluOpTypes::Div => {
-                    current_op.alu_result = if op2 != 0 {
-                        (((op1 as i32) as i64) / ((op2 as i32) as i64)) as u32
-                    } else {
-                        0xffff_ffffu32
-                    };
-                    self.int_mul_div_stall_countdown = None;
-                }
-                AluOpTypes::Divu => {
-                    current_op.alu_result = if op2 != 0 {
-                        ((op1 as u64) / (op2 as u64)) as u32
-                    } else {
-                        0xffff_ffffu32
-                    };
-                    self.int_mul_div_stall_countdown = None;
-                }
-                AluOpTypes::Rem => {
-                    current_op.alu_result = if op2 != 0 {
-                        ((op1 as i32).wrapping_rem(op2 as i32)) as u32
-                    } else {
-                        op1
-                    };
-                    self.int_mul_div_stall_countdown = None;
-                }
-                AluOpTypes::Remu => {
-                    current_op.alu_result = if op2 != 0 { op1 % op2 } else { op1 };
-                    self.int_mul_div_stall_countdown = None;
-                }
+            let (op1, op2) = execute::alu_operands(current_op);
+            current_op.alu_result = execute::alu_result(current_op.alu_op_type, op1, op2);
+            if execute::m_extension_stall(current_op.inst).is_some() {
+                self.int_mul_div_stall_countdown = None;
             }
 
             // whether current ALU Result is write-back data to destination register rd
@@ -655,59 +344,10 @@ where
             // It must judge whether the last branch prediction result is correct and
             // notify the pipeline to perform branch recovery in need.
             if current_op.is_branch {
-                #[allow(unused_assignments)]
-                let mut is_taken = false;
-                let branch_op1 = current_op.rs1.or(Some((0, 0))).unwrap().1;
-                let branch_op2 = current_op.rs2.or(Some((0, 0))).unwrap().1;
-
-                match current_op.inst {
-                    // unconditional branch
-                    Instruction::Jal(_) | Instruction::Jalr(_) => is_taken = true,
-                    // conditional branch
-                    Instruction::Beq(_) => {
-                        is_taken = if branch_op1 == branch_op2 {
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    Instruction::Bne(_) => {
-                        is_taken = if branch_op1 != branch_op2 {
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    Instruction::Blt(_) => {
-                        is_taken = if (branch_op1 as i32) < (branch_op2 as i32) {
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    Instruction::Bge(_) => {
-                        is_taken = if (branch_op1 as i32) >= (branch_op2 as i32) {
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    Instruction::Bltu(_) => {
-                        is_taken = if branch_op1 < branch_op2 { true } else { false }
-                    }
-                    Instruction::Bgeu(_) => {
-                        is_taken = if branch_op1 >= branch_op2 {
-                            true
-                        } else {
-                            false
-                        }
-                    }
-
-                    // non-branch inst.
-                    _ => {
-                        unreachable!("Non-control-flow instructions should not get to here!");
-                    }
-                }
+                let branch_op1 = current_op.rs1.unwrap_or((0, 0)).1;
+                let branch_op2 = current_op.rs2.unwrap_or((0, 0)).1;
+                let is_taken = execute::branch_taken(current_op.inst, branch_op1, branch_op2)
+                    .expect("Non-control-flow instructions should not reach branch resolution");
 
                 // check whether the last branch prediction is incorrect
                 // There are two possible incorrec results

@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             prog_body,
         },
         simulation_config(&args),
-    );
+    )?;
 
     println!("Program: {}", args.prog);
     println!("Replacement policy: {:?}", args.rp);

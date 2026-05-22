@@ -2,7 +2,7 @@ use super::branch_predictor::BranchPredictResult;
 use crate::riscv::format_types::IType;
 use crate::riscv::instruction::Instruction;
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AluOpTypes {
     #[default]
     Add,
@@ -25,7 +25,7 @@ pub enum AluOpTypes {
     Remu,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AluOpOneSelect {
     #[default]
     RegRs1,
@@ -33,7 +33,7 @@ pub enum AluOpOneSelect {
     Zero,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AluOpTwoSelect {
     #[default]
     RegRs2,

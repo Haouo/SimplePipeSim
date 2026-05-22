@@ -53,6 +53,9 @@ configurable from the CLI:
 
 Cache size, block size, associativity, and additional miss penalty are
 configured independently for `l1i`, `l1d`, and `l2`.
+Cache block size and number of sets must stay powers of two so address
+decomposition remains exact; invalid cache geometry is reported before the
+simulation starts.
 
 ### `SimpleDram` (cycle-accurate substrate)
 

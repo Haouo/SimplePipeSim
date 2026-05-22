@@ -1,5 +1,6 @@
 // sub-modules
 pub mod cache_set; // model for single cache set (might contains multiple ways)
+pub mod config; // validated geometry and cache configuration
 pub mod prefetcher; // model for cache prefetcher (Null, NextLine, ...)
 pub mod replacement_policy; // model for cache replacement policy (e.g., Random, FIFO, LRU)
 pub mod statistic; // utils of statistics for cache
@@ -9,7 +10,8 @@ use super::super::statistic::Statistic;
 use crate::hardware::clock::Clocked;
 use crate::hardware::mem::abstract_mem::*;
 use cache_set::GeneralCacheSetUnit;
-use prefetcher::{Prefetcher, PrefetcherKind};
+pub use config::{GeneralCacheConfig, GeneralCacheConfigError};
+use prefetcher::Prefetcher;
 use replacement_policy::ReplacementPolicy;
 use statistic::StatisticInfo;
 use write_policy::WritePolicy;
@@ -17,90 +19,6 @@ use write_policy::WritePolicy;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
-
-/// Default additional miss penalty in cycles, used when
-/// [`GeneralCacheConfig::with_miss_penalty`] is not called.
-const DEFAULT_MISS_PENALTY_CYCLES: usize = 5;
-
-// a special struct data type for cache configuring
-#[derive(Default, Clone)]
-pub struct GeneralCacheConfig {
-    name: String,
-    total_size: Option<usize>,
-    block_size: Option<usize>,
-    num_of_way: Option<usize>,
-    /// Additional cycles charged after a miss resolves, on top of the
-    /// time taken to fetch from the next-level memory. Models tag-array
-    /// re-access and the pipeline bubble while the refilled block becomes
-    /// visible. `None` means "use the default".
-    miss_penalty: Option<usize>,
-    /// Write policy. `None` ⇒ `WritePolicy::default()` (write-back +
-    /// write-allocate, the historical behaviour).
-    write_policy: Option<WritePolicy>,
-    /// Hardware prefetcher. `None` ⇒ `PrefetcherKind::default()`
-    /// (`Null`, i.e. disabled).
-    prefetcher_kind: Option<PrefetcherKind>,
-}
-
-impl GeneralCacheConfig {
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            ..Default::default()
-        }
-    }
-
-    pub fn with_total_size(&self, size_in_bytes: usize) -> Self {
-        let mut new_self = self.clone();
-        new_self.total_size = Some(size_in_bytes);
-        new_self
-    }
-
-    pub fn with_block_size(&self, size_in_bytes: usize) -> Self {
-        assert!(
-            self.total_size != None,
-            "You have to configure total size first befor configuring block size!"
-        );
-        let mut new_self = self.clone();
-        new_self.block_size = Some(size_in_bytes);
-        new_self
-    }
-
-    pub fn with_num_of_way(&self, ways: usize) -> Self {
-        assert!(
-            self.block_size != None,
-            "You have to configure block size before configuring number of ways!"
-        );
-        let mut new_self = self.clone();
-        new_self.num_of_way = Some(ways);
-        new_self
-    }
-
-    /// Set the additional miss penalty (in cycles) for this cache level.
-    ///
-    /// If not set, the cache uses [`DEFAULT_MISS_PENALTY_CYCLES`] (5). Use this
-    /// to express that, for example, an L1 cache has a smaller post-miss
-    /// recovery cost than an L2 cache that drives main memory.
-    pub fn with_miss_penalty(&self, cycles: usize) -> Self {
-        let mut new_self = self.clone();
-        new_self.miss_penalty = Some(cycles);
-        new_self
-    }
-
-    /// Set the write policy. Defaults to write-back + write-allocate.
-    pub fn with_write_policy(&self, wp: WritePolicy) -> Self {
-        let mut new_self = self.clone();
-        new_self.write_policy = Some(wp);
-        new_self
-    }
-
-    /// Set the hardware prefetcher kind. Defaults to `Null` (disabled).
-    pub fn with_prefetcher_kind(&self, kind: PrefetcherKind) -> Self {
-        let mut new_self = self.clone();
-        new_self.prefetcher_kind = Some(kind);
-        new_self
-    }
-}
 
 /// States for the main FSM that drives a `GeneralCache`.
 ///
@@ -231,24 +149,20 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> GeneralCache<RP, M> {
     // public methods
     /// only constructor for GeneralCache
     pub fn new(config: GeneralCacheConfig, mem_ref: Rc<RefCell<M>>) -> Self {
-        let block_size = config.block_size.unwrap();
-        let num_set = config.total_size.unwrap() / (block_size * config.num_of_way.unwrap());
-        let prefetcher = config
-            .prefetcher_kind
-            .unwrap_or_default()
-            .build(block_size);
+        let block_size = config.geometry.block_size;
+        let prefetcher = config.prefetcher_kind.build(block_size);
         GeneralCache {
-            offset_bit_width: block_size.ilog2() as usize,
-            index_bit_width: num_set.ilog2() as usize,
-            set: (0..num_set)
-                .map(|_| GeneralCacheSetUnit::<RP>::new(config.num_of_way.unwrap(), block_size))
+            offset_bit_width: config.geometry.offset_bit_width,
+            index_bit_width: config.geometry.index_bit_width,
+            set: (0..config.geometry.num_sets)
+                .map(|_| GeneralCacheSetUnit::<RP>::new(config.geometry.num_of_way, block_size))
                 .collect(),
             fsm: MainStates::Idle,
             mem_ref,
             pending_req: None,
             backup_req: None,
-            miss_penalty: config.miss_penalty.unwrap_or(DEFAULT_MISS_PENALTY_CYCLES),
-            write_policy: config.write_policy.unwrap_or_default(),
+            miss_penalty: config.miss_penalty,
+            write_policy: config.write_policy,
             prefetcher,
             prefetch_queue: VecDeque::new(),
             prefetch_in_flight: false,
@@ -268,7 +182,9 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> GeneralCache<RP, M> {
     }
 }
 
-impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> AbstractMemoryInterface for GeneralCache<RP, M> {
+impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> AbstractMemoryInterface
+    for GeneralCache<RP, M>
+{
     fn try_register_req(&mut self, req: &MemoryReqType) -> Result<(), ()> {
         // CPU requests are byte/halfword/word accesses. Refills and
         // write-backs from an upper cache move an aligned region that fits
@@ -415,8 +331,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                                     // Cache copy stays clean (matches
                                     // memory after the propagate
                                     // completes).
-                                    self.set[index]
-                                        .write_block_clean(way_index, &read_block);
+                                    self.set[index].write_block_clean(way_index, &read_block);
                                     let propagate = MemoryStoreReq {
                                         addr: req.get_addr(),
                                         len: req.get_len(),
@@ -425,9 +340,9 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                                     };
                                     let caller_done = store_req.done.clone();
                                     next_state = Some(MainStates::WriteThroughCommit(
-                                        StatesForOutMemReq::SendReq(
-                                            MemoryReqType::Store(propagate),
-                                        ),
+                                        StatesForOutMemReq::SendReq(MemoryReqType::Store(
+                                            propagate,
+                                        )),
                                         caller_done,
                                     ));
                                 } else {
@@ -482,7 +397,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                                     << (self.index_bit_width + self.offset_bit_width)) // tag part
                                     + ((index as u32) << self.offset_bit_width)) // index part
                                     & !((1 << self.offset_bit_width) - 1); // bit mask
-                                // get data of the old block which is dirty
+                                                                           // get data of the old block which is dirty
                                 let old_dirty_data = self.set[index].read_block(evict_way);
 
                                 // construct MemoryReqType::Store
@@ -638,8 +553,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                 match second_state {
                     StatesForOutMemReq::SendReq(ref req) => {
                         if self.mem_ref.borrow_mut().try_register_req(req).is_ok() {
-                            *second_state =
-                                StatesForOutMemReq::WaitForComplete(req.clone());
+                            *second_state = StatesForOutMemReq::WaitForComplete(req.clone());
                         }
                     }
                     StatesForOutMemReq::WaitForComplete(ref req) => {
@@ -661,8 +575,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                 match second_state {
                     StatesForOutMemReq::SendReq(ref req) => {
                         if self.mem_ref.borrow_mut().try_register_req(req).is_ok() {
-                            *second_state =
-                                StatesForOutMemReq::WaitForComplete(req.clone());
+                            *second_state = StatesForOutMemReq::WaitForComplete(req.clone());
                         }
                     }
                     StatesForOutMemReq::WaitForComplete(ref req) => {
@@ -713,10 +626,8 @@ mod unit_tests {
         }
 
         let mem = Rc::new(RefCell::new(SimpleMem::new(random_init_data)));
-        let cache_config = GeneralCacheConfig::new("test_cache".to_string())
-            .with_total_size(4096)
-            .with_block_size(32)
-            .with_num_of_way(2);
+        let cache_config =
+            GeneralCacheConfig::new("test_cache", 4096, 32, 2).expect("valid cache config");
         let cache = GeneralCache::<FifoRP, SimpleMem>::new(cache_config, Rc::clone(&mem));
         (cache, mem)
     }
@@ -858,10 +769,8 @@ mod unit_tests {
     /// `try_register_req`).
     fn cycles_to_resolve_cold_miss(miss_penalty_cycles: usize) -> usize {
         let mem = Rc::new(RefCell::new(SimpleMem::new(vec![0u8; 0x10000])));
-        let cfg = GeneralCacheConfig::new("test".to_string())
-            .with_total_size(4096)
-            .with_block_size(32)
-            .with_num_of_way(2)
+        let cfg = GeneralCacheConfig::new("test", 4096, 32, 2)
+            .expect("valid cache config")
             .with_miss_penalty(miss_penalty_cycles);
         let mut cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));
 
@@ -923,10 +832,8 @@ mod unit_tests {
     #[test]
     fn accepts_aligned_upper_cache_block_transfer() {
         let mem = Rc::new(RefCell::new(SimpleMem::new(vec![0u8; 0x10000])));
-        let cfg = GeneralCacheConfig::new("l2".to_string())
-            .with_total_size(16384)
-            .with_block_size(64)
-            .with_num_of_way(4)
+        let cfg = GeneralCacheConfig::new("l2", 16384, 64, 4)
+            .expect("valid cache config")
             .with_miss_penalty(1);
         let mut cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));
         let upper_cache_fill = MemoryReqType::Load(MemoryLoadReq {
@@ -948,10 +855,8 @@ mod unit_tests {
         wp: write_policy::WritePolicy,
     ) -> (GeneralCache<FifoRP, SimpleMem>, Rc<RefCell<SimpleMem>>) {
         let mem = Rc::new(RefCell::new(SimpleMem::new(vec![0u8; 0x10000])));
-        let cfg = GeneralCacheConfig::new("test".to_string())
-            .with_total_size(4096)
-            .with_block_size(32)
-            .with_num_of_way(2)
+        let cfg = GeneralCacheConfig::new("test", 4096, 32, 2)
+            .expect("valid cache config")
             .with_miss_penalty(1)
             .with_write_policy(wp);
         let cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));
@@ -1048,10 +953,8 @@ mod unit_tests {
         block_size: u32,
     ) -> (usize, usize) {
         let mem = Rc::new(RefCell::new(SimpleMem::new(vec![0u8; 0x10000])));
-        let cfg = GeneralCacheConfig::new("test".to_string())
-            .with_total_size(4096)
-            .with_block_size(block_size as usize)
-            .with_num_of_way(2)
+        let cfg = GeneralCacheConfig::new("test", 4096, block_size as usize, 2)
+            .expect("valid cache config")
             .with_miss_penalty(1)
             .with_prefetcher_kind(kind);
         let mut cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));

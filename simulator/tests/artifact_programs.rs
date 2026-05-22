@@ -54,7 +54,7 @@ fn riscv_isa_artifacts_pass() {
 
     for inst_name in inst_list {
         let program = elf::elf_loader(&Path::new("../riscv-tests/isa").join(inst_name));
-        let report = run(program, SimulationConfig::default());
+        let report = run(program, SimulationConfig::default()).expect("run ISA fixture");
         assert_eq!(
             report.final_registers[3],
             1,
@@ -71,7 +71,7 @@ fn runtime_workload_artifacts_halt() {
         let program = elf::elf_loader(
             &Path::new("../target/riscv32im-unknown-none-elf/debug").join(prog_name),
         );
-        let report = run(program, SimulationConfig::default());
+        let report = run(program, SimulationConfig::default()).expect("run runtime workload");
         assert!(
             report.pipeline.inst_retire > 0,
             "runtime workload {prog_name} retired no instructions"
