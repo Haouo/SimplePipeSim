@@ -63,8 +63,8 @@ pub struct Args {
     pub prefetcher: PrefetcherArg,
 
     /// Write per-cache statistics to this JSON file.
-    /// Schema: { "l1i": StatisticInfo, "l1d": StatisticInfo, "l2": StatisticInfo,
-    /// "config": { mirror of CLI args } }.
+    /// Schema: { "pipeline": StatisticInfo, "l1i": StatisticInfo,
+    /// "l1d": StatisticInfo, "l2": StatisticInfo, "config": { mirror of CLI args } }.
     #[arg(long)]
     pub stats_out: Option<PathBuf>,
 }

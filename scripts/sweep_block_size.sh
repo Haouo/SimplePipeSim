@@ -4,13 +4,13 @@
 # fed to an offline plotter (gnuplot, matplotlib, etc.).
 #
 # Usage:   scripts/sweep_block_size.sh [prog] [rp]
-# Example: scripts/sweep_block_size.sh matmul fifo
+# Example: scripts/sweep_block_size.sh hello fifo
 #
 # Output:  results/blk_<size>_<prog>_<rp>.json  (one file per block size)
 
 set -euo pipefail
 
-PROG="${1:-matmul}"
+PROG="${1:-hello}"
 RP="${2:-fifo}"
 BLOCKS=(4 8 16 32 64 128)
 

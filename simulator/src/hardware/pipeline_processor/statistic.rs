@@ -1,4 +1,4 @@
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize)]
 pub struct StatisticInfo {
     // be recorded during runtime
     pub total_ticked_cycle: usize,
@@ -38,5 +38,46 @@ impl StatisticInfo {
         if valid {
             self.actual_flushed_inst_cnt += 1;
         }
+    }
+
+    pub fn finalize_rates(&mut self) {
+        let safe_ratio = |num: usize, den: usize| -> f64 {
+            if den == 0 {
+                0.0
+            } else {
+                num as f64 / den as f64
+            }
+        };
+        self.ipc = safe_ratio(self.inst_retire, self.total_ticked_cycle);
+        self.branch_miss_rate = safe_ratio(self.branch_miss_cnt, self.branch_inst_cnt);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx_eq(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn finalize_rates_basic() {
+        let mut s = StatisticInfo::default();
+        s.total_ticked_cycle = 40;
+        s.inst_retire = 25;
+        s.branch_inst_cnt = 10;
+        s.branch_miss_cnt = 2;
+        s.finalize_rates();
+        assert!(approx_eq(s.ipc, 0.625));
+        assert!(approx_eq(s.branch_miss_rate, 0.2));
+    }
+
+    #[test]
+    fn finalize_rates_zero_denominators_return_zero() {
+        let mut s = StatisticInfo::default();
+        s.finalize_rates();
+        assert_eq!(s.ipc, 0.0);
+        assert_eq!(s.branch_miss_rate, 0.0);
     }
 }

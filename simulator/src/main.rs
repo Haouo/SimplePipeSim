@@ -6,10 +6,11 @@ use clap::Parser;
 
 use hardware::clock::Clocked;
 use hardware::mem::general_cache::replacement_policy::{self as rp, ReplacementPolicy};
-use hardware::mem::general_cache::statistic::StatisticInfo;
+use hardware::mem::general_cache::statistic::StatisticInfo as CacheStatisticInfo;
 use hardware::mem::general_cache::GeneralCacheConfig;
 use hardware::mem::simple_mem::SimpleMem;
 use hardware::pipeline_processor::pipe::PipelineProcessor;
+use hardware::pipeline_processor::statistic::StatisticInfo as PipelineStatisticInfo;
 use hardware::statistic::Statistic;
 use sim::cli::{Args, ReplacementPolicyArg};
 use sim::elf;
@@ -20,9 +21,10 @@ use std::rc::Rc;
 
 #[derive(serde::Serialize)]
 struct RunReport<'a> {
-    l1i: StatisticInfo,
-    l1d: StatisticInfo,
-    l2: StatisticInfo,
+    pipeline: PipelineStatisticInfo,
+    l1i: CacheStatisticInfo,
+    l1d: CacheStatisticInfo,
+    l2: CacheStatisticInfo,
     config: &'a Args,
 }
 
@@ -59,7 +61,12 @@ fn run_simulation<RP: ReplacementPolicy>(
     l1i_cfg: GeneralCacheConfig,
     l1d_cfg: GeneralCacheConfig,
     l2_cfg: GeneralCacheConfig,
-) -> (StatisticInfo, StatisticInfo, StatisticInfo) {
+) -> (
+    PipelineStatisticInfo,
+    CacheStatisticInfo,
+    CacheStatisticInfo,
+    CacheStatisticInfo,
+) {
     let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
     let mut cpu =
         PipelineProcessor::<RP>::new(entry_pc, l1i_cfg, l1d_cfg, l2_cfg, &mem);
@@ -67,10 +74,11 @@ fn run_simulation<RP: ReplacementPolicy>(
         cpu.tick();
         mem.borrow_mut().tick();
     }
+    let pipeline_stats = cpu.get_statistic_info();
     let l1i_stats = cpu.icache.get_statistic_info();
     let l1d_stats = cpu.dcache.get_statistic_info();
     let l2_stats = cpu.l2_cache.borrow().get_statistic_info();
-    (l1i_stats, l1d_stats, l2_stats)
+    (pipeline_stats, l1i_stats, l1d_stats, l2_stats)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -84,7 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (l1i_cfg, l1d_cfg, l2_cfg) = build_configs(&args);
 
-    let (l1i_stats, l1d_stats, l2_stats) = match args.rp {
+    let (pipeline_stats, l1i_stats, l1d_stats, l2_stats) = match args.rp {
         ReplacementPolicyArg::Fifo => {
             run_simulation::<rp::fifo::FifoRP>(entry_pc, prog_body, l1i_cfg, l1d_cfg, l2_cfg)
         }
@@ -98,6 +106,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Program: {}", args.prog);
     println!("Replacement policy: {:?}", args.rp);
+    println!(
+        "Pipeline: cycles={} retired={} ipc={:.4} branch_miss={:.4}",
+        pipeline_stats.total_ticked_cycle,
+        pipeline_stats.inst_retire,
+        pipeline_stats.ipc,
+        pipeline_stats.branch_miss_rate
+    );
     for (label, s) in [
         ("L1-I$", &l1i_stats),
         ("L1-D$", &l1d_stats),
@@ -118,6 +133,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if let Some(path) = &args.stats_out {
         let report = RunReport {
+            pipeline: pipeline_stats,
             l1i: l1i_stats,
             l1d: l1d_stats,
             l2: l2_stats,

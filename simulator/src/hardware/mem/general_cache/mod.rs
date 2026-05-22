@@ -270,20 +270,23 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> GeneralCache<RP, M> {
 
 impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> AbstractMemoryInterface for GeneralCache<RP, M> {
     fn try_register_req(&mut self, req: &MemoryReqType) -> Result<(), ()> {
-        // check address alignment
-        let mut alignment_check: bool = true;
-        match req.get_len() {
-            4 => {
-                alignment_check = (req.get_addr() % 4) == 0;
-            }
-            2 => {
-                alignment_check = (req.get_addr() % 2) == 0;
-            }
-            1 => {}
+        // CPU requests are byte/halfword/word accesses. Refills and
+        // write-backs from an upper cache move an aligned region that fits
+        // within one lower-level cache block.
+        let req_len = req.get_len();
+        let req_addr = req.get_addr() as usize;
+        let alignment_check = match req_len {
+            1 => true,
+            2 | 4 => req_addr % req_len == 0,
             _ => {
-                alignment_check = false; // access with length larger than 4 bytes is not allowed
+                let offset = req_addr % self.block_size_bytes;
+                req_len > 0
+                    && req_len <= self.block_size_bytes
+                    && req_len.is_power_of_two()
+                    && req_addr % req_len == 0
+                    && offset + req_len <= self.block_size_bytes
             }
-        }
+        };
         assert!(
             alignment_check,
             "Cache Access Alignment Checking Fail!\n The Request Address is: {:#08X}, Length is: {}",
@@ -915,6 +918,28 @@ mod unit_tests {
             mem.borrow_mut().tick();
         }
         panic!("request never completed");
+    }
+
+    #[test]
+    fn accepts_aligned_upper_cache_block_transfer() {
+        let mem = Rc::new(RefCell::new(SimpleMem::new(vec![0u8; 0x10000])));
+        let cfg = GeneralCacheConfig::new("l2".to_string())
+            .with_total_size(16384)
+            .with_block_size(64)
+            .with_num_of_way(4)
+            .with_miss_penalty(1);
+        let mut cache = GeneralCache::<FifoRP, SimpleMem>::new(cfg, Rc::clone(&mem));
+        let upper_cache_fill = MemoryReqType::Load(MemoryLoadReq {
+            addr: 0,
+            len: 32,
+            buffer: Rc::new(RefCell::new(vec![0u8; 32].into_boxed_slice())),
+            done: Rc::new(Cell::new(false)),
+        });
+
+        cache
+            .try_register_req(&upper_cache_fill)
+            .expect("register upper cache block transfer");
+        run_until_done(&mut cache, &mem, &upper_cache_fill.get_load_req_ref().done);
     }
 
     /// Build a cache configured with the given write policy, backed by a

@@ -91,7 +91,8 @@ SimplePipeSim/
 │   ├── src/                   # entry stub, allocator, basic_io (stdout / exit)
 │   └── bin/                   # hello, print_nums, qsort, msort, matmul, factorial
 ├── scripts/
-│   └── sweep_block_size.sh    # example: sweep L1-D$ block size, dump JSON
+│   ├── sweep_block_size.sh    # example: sweep L1-D$ block size, dump JSON
+│   └── plot_results.py        # aggregate reports and plot first comparisons
 ├── results/                   # JSON dumps from sweeps
 └── riscv-tests/               # (placeholder for RISC-V test binaries)
 ```
@@ -155,6 +156,7 @@ report is written with the shape:
 
 ```json
 {
+  "pipeline": { "total_ticked_cycle": ..., "inst_retire": ..., "ipc": ..., "branch_miss_rate": ... },
   "l1i":   { "name": "L1-I$", "load_cnt": ..., "load_miss_cnt": ..., "overall_miss_rate": ..., "prefetch_issued_cnt": ... },
   "l1d":   { ... },
   "l2":    { ... },
@@ -183,12 +185,19 @@ visible.
 
 `scripts/sweep_block_size.sh` shows the intended workflow for parameter
 studies: run the simulator across a range of one knob, dump JSON for each
-configuration, and feed the result into an offline plotter.
+configuration, and feed the result into the first plotting workflow.
 
 ```sh
-scripts/sweep_block_size.sh matmul fifo
-# produces results/blk_<size>_matmul_fifo.json for size ∈ {4, 8, 16, 32, 64, 128}
+scripts/sweep_block_size.sh hello fifo
+# produces results/blk_<size>_hello_fifo.json for size ∈ {4, 8, 16, 32, 64, 128}
+python3 scripts/plot_results.py results
 ```
+
+`plot_results.py` writes a tidy `results/plots/runs.csv` plus PNG comparisons
+for L1-D miss rate, IPC, and cycle count against `l1d_block`. It uses
+`matplotlib` for PNG output; `--csv-only` keeps aggregation available without
+that dependency. Use `--x` with another cache config field, such as
+`l1d_ways`, when plotting a different sweep.
 
 ## Testing
 

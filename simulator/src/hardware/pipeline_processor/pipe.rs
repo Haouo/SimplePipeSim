@@ -1057,8 +1057,7 @@ where
     fn get_statistic_info(&self) -> Self::StatisticInfo {
         // calculate parts of statistics info.
         let mut ret = self.hpm.clone();
-        ret.ipc = ret.inst_retire as f64 / ret.total_ticked_cycle as f64;
-        ret.branch_miss_rate = ret.branch_miss_cnt as f64 / ret.branch_inst_cnt as f64;
+        ret.finalize_rates();
         // return
         ret
     }
