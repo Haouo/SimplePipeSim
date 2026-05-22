@@ -40,13 +40,16 @@ AdditionalMissPenalty → Lookup`. A hit completes in the same cycle as the
 requesting `try_register_req` call (the FSM is pre-ticked twice on
 registration to model 1-cycle hit latency to the caller).
 
-Three orthogonal cache knobs are configurable **per level** from the CLI:
+The cache policies plus the top-level pipeline and memory selectors are
+configurable from the CLI:
 
 | Knob                 | Options (CLI value)                              | Where                                            |
 |----------------------|--------------------------------------------------|--------------------------------------------------|
 | Replacement policy   | `fifo`, `random`, `plru` (PLRU needs power-of-2 ways) | `--rp`                                           |
 | Write policy         | `wb-wa`, `wb-nwa`, `wt-wa`, `wt-nwa`             | `--wp`                                           |
 | Prefetcher           | `null`, `next-line`                              | `--prefetcher`                                   |
+| Branch predictor     | `dummy`, `bimodal`                               | `--bp`                                           |
+| Backing memory       | `simple-mem`, `dram`                             | `--memory`                                       |
 
 Cache size, block size, associativity, and additional miss penalty are
 configured independently for `l1i`, `l1d`, and `l2`.
@@ -179,6 +182,8 @@ visible.
 | `--rp`                   | `fifo`  | Replacement policy: `fifo`, `random`, `plru`. |
 | `--wp`                   | `wb-wa` | Write policy: `wb-wa`, `wb-nwa`, `wt-wa`, `wt-nwa`. |
 | `--prefetcher`           | `null`  | `null` or `next-line`. |
+| `--bp`                   | `bimodal` | Branch predictor: `dummy` or `bimodal`. |
+| `--memory`               | `simple-mem` | L2 backing memory: flat-latency `simple-mem` or row-buffer-aware `dram` with educational timing defaults. |
 | `--stats-out`            | _(unset)_ | Path to write the JSON report. |
 
 ## Sweep scripts
@@ -202,12 +207,23 @@ that dependency. Use `--x` with another cache config field, such as
 ## Testing
 
 Unit tests live next to each module under `#[cfg(test)]` (cache FSM,
-DRAM timing paths, prefetcher behaviour, etc.). Run them from the
-workspace root:
+DRAM timing paths, prefetcher behaviour, etc.). Self-contained integration
+tests exercise the public simulation runner with in-memory RISC-V programs.
+Run the default suite from the workspace root:
 
 ```sh
 cargo test -p simulator
 ```
+
+Artifact-backed suites are opt-in because they require prebuilt ELF inputs:
+
+```sh
+cargo test -p simulator --test artifact_programs -- --ignored
+```
+
+`riscv_isa_artifacts_pass` expects ISA fixtures under `riscv-tests/isa`.
+`runtime_workload_artifacts_halt` expects runtime ELFs built under
+`target/riscv32im-unknown-none-elf/debug`.
 
 ## Status
 

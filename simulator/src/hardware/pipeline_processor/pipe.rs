@@ -6,7 +6,6 @@ use super::super::clock::Clocked;
 use super::super::mem::abstract_mem::*;
 use super::super::mem::general_cache::replacement_policy::ReplacementPolicy;
 use super::super::mem::general_cache::GeneralCache;
-use super::super::mem::simple_mem::SimpleMem;
 use super::super::statistic::Statistic;
 use super::super::uop::*;
 use super::statistic;
@@ -31,9 +30,10 @@ enum PipelineMemoryFSM {
 /// Public struct `PipelineProcessor`
 ///
 /// This struct contains the necessary information to imitate a classic 5 stage RISC-V pipeline processor.
-pub struct PipelineProcessor<RP>
+pub struct PipelineProcessor<RP, M>
 where
     RP: ReplacementPolicy,
+    M: AbstractMemoryInterface,
 {
     // Halt signal
     pub halt: bool,
@@ -70,19 +70,20 @@ where
     int_mul_div_stall_countdown: Option<usize>,
 
     // L1 Instruction Cache
-    pub icache: GeneralCache<RP, GeneralCache<RP, SimpleMem>>,
+    pub icache: GeneralCache<RP, GeneralCache<RP, M>>,
     // L1 Data Cache
-    pub dcache: GeneralCache<RP, GeneralCache<RP, SimpleMem>>,
+    pub dcache: GeneralCache<RP, GeneralCache<RP, M>>,
     // L2 Unified Cache (shared by icache and dcache)
-    pub l2_cache: Rc<RefCell<GeneralCache<RP, SimpleMem>>>,
+    pub l2_cache: Rc<RefCell<GeneralCache<RP, M>>>,
 
     // statistic information (also called Hardware Performance Monitor, HPM)
     pub hpm: statistic::StatisticInfo,
 }
 
-impl<RP> PipelineProcessor<RP>
+impl<RP, M> PipelineProcessor<RP, M>
 where
     RP: ReplacementPolicy,
+    M: AbstractMemoryInterface,
 {
     /// The constructor of PipeState struct.
     ///
@@ -92,16 +93,35 @@ where
         l1i_cache_config: GeneralCacheConfig,
         l1d_cache_config: GeneralCacheConfig,
         l2_cache_config: GeneralCacheConfig,
-        mem_ref: &Rc<RefCell<SimpleMem>>,
+        mem_ref: &Rc<RefCell<M>>,
     ) -> Self {
-        let l2_cache = Rc::new(RefCell::new(
-            GeneralCache::<RP, SimpleMem>::new(l2_cache_config, Rc::clone(mem_ref)),
-        ));
+        Self::new_with_predictor(
+            init_pc,
+            l1i_cache_config,
+            l1d_cache_config,
+            l2_cache_config,
+            mem_ref,
+            Box::new(super::super::branch_predictor::bimodal::Predictor::new()),
+        )
+    }
+
+    pub fn new_with_predictor(
+        init_pc: u32,
+        l1i_cache_config: GeneralCacheConfig,
+        l1d_cache_config: GeneralCacheConfig,
+        l2_cache_config: GeneralCacheConfig,
+        mem_ref: &Rc<RefCell<M>>,
+        branch_predictor: Box<dyn BranchPredict>,
+    ) -> Self {
+        let l2_cache = Rc::new(RefCell::new(GeneralCache::<RP, M>::new(
+            l2_cache_config,
+            Rc::clone(mem_ref),
+        )));
         PipelineProcessor {
             halt: false,
             if_pc: init_pc,
             if_raw_isnt_buffer: None,
-            branch_predictor: Box::new(super::super::branch_predictor::bimodal::Predictor::new()),
+            branch_predictor,
             id_regs: [0; 32],
             id_op: None,
             exe_op: None,
@@ -116,17 +136,21 @@ where
             branch_destination: 0,
             branch_flushes: 0,
             int_mul_div_stall_countdown: None,
-            icache: GeneralCache::<RP, GeneralCache<RP, SimpleMem>>::new(
+            icache: GeneralCache::<RP, GeneralCache<RP, M>>::new(
                 l1i_cache_config,
                 l2_cache.clone(),
             ),
-            dcache: GeneralCache::<RP, GeneralCache<RP, SimpleMem>>::new(
+            dcache: GeneralCache::<RP, GeneralCache<RP, M>>::new(
                 l1d_cache_config,
                 l2_cache.clone(),
             ),
             l2_cache,
             hpm: statistic::StatisticInfo::default(),
         }
+    }
+
+    pub fn registers(&self) -> [u32; 32] {
+        self.id_regs
     }
 
     /// ### Instruction Fetch Pipeline Stage Function
@@ -966,9 +990,10 @@ where
     }
 }
 
-impl<RP> Clocked for PipelineProcessor<RP>
+impl<RP, M> Clocked for PipelineProcessor<RP, M>
 where
     RP: ReplacementPolicy,
+    M: AbstractMemoryInterface,
 {
     /// ### tick() function to simulate clock-edge trigger
     ///
@@ -1049,9 +1074,10 @@ where
     }
 }
 
-impl<RP> Statistic for PipelineProcessor<RP>
+impl<RP, M> Statistic for PipelineProcessor<RP, M>
 where
     RP: ReplacementPolicy,
+    M: AbstractMemoryInterface,
 {
     type StatisticInfo = statistic::StatisticInfo;
     fn get_statistic_info(&self) -> Self::StatisticInfo {
@@ -1060,147 +1086,5 @@ where
         ret.finalize_rates();
         // return
         ret
-    }
-}
-
-#[cfg(test)]
-mod unit_tests {
-    use super::*;
-    use crate::hardware::mem::general_cache::replacement_policy as rp;
-    use crate::hardware::mem::simple_mem::SimpleMem;
-    use crate::sim::elf;
-
-    use std::path::Path;
-
-    #[test]
-    fn riscv_tests() {
-        let inst_list: Vec<&str> = vec![
-            "rv32ui-p-add",
-            "rv32ui-p-lui",
-            "rv32ui-p-sub",
-            "rv32ui-p-addi",
-            "rv32ui-p-and",
-            "rv32ui-p-andi",
-            "rv32ui-p-lw",
-            "rv32ui-p-lh",
-            "rv32ui-p-lhu",
-            "rv32ui-p-lb",
-            "rv32ui-p-lbu",
-            "rv32ui-p-sw",
-            "rv32ui-p-sh",
-            "rv32ui-p-sb",
-            "rv32ui-p-beq",
-            "rv32ui-p-bne",
-            "rv32ui-p-blt",
-            "rv32ui-p-bge",
-            "rv32ui-p-bltu",
-            "rv32ui-p-bgeu",
-            "rv32ui-p-jal",
-            "rv32ui-p-jalr",
-            "rv32ui-p-or",
-            "rv32ui-p-ori",
-            "rv32ui-p-sll",
-            "rv32ui-p-slli",
-            "rv32ui-p-sra",
-            "rv32ui-p-srai",
-            "rv32ui-p-srl",
-            "rv32ui-p-srli",
-            "rv32ui-p-slt",
-            "rv32ui-p-sltu",
-            "rv32ui-p-slti",
-            "rv32ui-p-sltiu",
-            "rv32ui-p-auipc",
-            "rv32um-p-mul",
-            "rv32um-p-mulh",
-            "rv32um-p-mulhu",
-            "rv32um-p-mulhsu",
-            "rv32um-p-div",
-            "rv32um-p-divu",
-            "rv32um-p-rem",
-            "rv32um-p-remu",
-        ];
-
-        // run each unit test for each instructions
-        let path_prefix = Path::new("../riscv-tests/isa");
-        for inst_name in inst_list {
-            let path = path_prefix.join(Path::new(inst_name));
-            let elf::ProgramInfo {
-                entry_pc,
-                prog_body,
-            } = elf::elf_loader(&path);
-            let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
-            let l1i_cache_config = GeneralCacheConfig::new("L1-I$".to_string())
-                .with_total_size(4096)
-                .with_block_size(32)
-                .with_num_of_way(4);
-            let l1d_cache_config = GeneralCacheConfig::new("L1-I$".to_string())
-                .with_total_size(4096)
-                .with_block_size(32)
-                .with_num_of_way(4);
-            let l2_cache_config = GeneralCacheConfig::new("L2$".to_string())
-                .with_total_size(16384)
-                .with_block_size(64)
-                .with_num_of_way(4);
-            let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(
-                entry_pc,
-                l1i_cache_config,
-                l1d_cache_config,
-                l2_cache_config,
-                &mem,
-            );
-
-            while cpu.halt == false {
-                cpu.tick();
-                mem.borrow_mut().tick();
-            }
-
-            assert_eq!(
-                cpu.id_regs[3],
-                1, // it pass the test if the value in $gp is 1
-                "Does not pass test {}, the wrong TESTNUM is {}",
-                inst_name,
-                (cpu.id_regs[3] - 1) / 2
-            );
-            println!("Pass the test: {}", inst_name);
-            // cpu.show_statistic_info();
-        }
-    }
-
-    #[test]
-    fn general_programs() {
-        let general_prog_names: Vec<&str> = vec!["hello", "print_nums", "msort", "qsort", "matmul"];
-        let path_prefix = Path::new("../target/riscv32im-unknown-none-elf/debug");
-        for prog_name in general_prog_names {
-            let elf::ProgramInfo {
-                entry_pc,
-                prog_body,
-            } = elf::elf_loader(&path_prefix.join(prog_name));
-
-            let mem = Rc::new(RefCell::new(SimpleMem::new(prog_body)));
-            let l1i_cache_config = GeneralCacheConfig::new("L1-I$".to_string())
-                .with_total_size(4096)
-                .with_block_size(32)
-                .with_num_of_way(4);
-            let l1d_cache_config = GeneralCacheConfig::new("L1-I$".to_string())
-                .with_total_size(4096)
-                .with_block_size(32)
-                .with_num_of_way(4);
-            let l2_cache_config = GeneralCacheConfig::new("L2$".to_string())
-                .with_total_size(16384)
-                .with_block_size(64)
-                .with_num_of_way(4);
-            let mut cpu = PipelineProcessor::<rp::fifo::FifoRP>::new(
-                entry_pc,
-                l1i_cache_config,
-                l1d_cache_config,
-                l2_cache_config,
-                &mem,
-            );
-
-            while cpu.halt == false {
-                cpu.tick();
-                mem.borrow_mut().tick();
-            }
-        }
     }
 }

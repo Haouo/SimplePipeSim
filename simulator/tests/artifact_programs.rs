@@ -1,0 +1,80 @@
+use std::path::Path;
+
+use simulator::sim::elf;
+use simulator::sim::runner::{run, SimulationConfig};
+
+#[test]
+#[ignore = "requires prebuilt riscv-tests ISA ELF fixtures under riscv-tests/isa"]
+fn riscv_isa_artifacts_pass() {
+    let inst_list = [
+        "rv32ui-p-add",
+        "rv32ui-p-lui",
+        "rv32ui-p-sub",
+        "rv32ui-p-addi",
+        "rv32ui-p-and",
+        "rv32ui-p-andi",
+        "rv32ui-p-lw",
+        "rv32ui-p-lh",
+        "rv32ui-p-lhu",
+        "rv32ui-p-lb",
+        "rv32ui-p-lbu",
+        "rv32ui-p-sw",
+        "rv32ui-p-sh",
+        "rv32ui-p-sb",
+        "rv32ui-p-beq",
+        "rv32ui-p-bne",
+        "rv32ui-p-blt",
+        "rv32ui-p-bge",
+        "rv32ui-p-bltu",
+        "rv32ui-p-bgeu",
+        "rv32ui-p-jal",
+        "rv32ui-p-jalr",
+        "rv32ui-p-or",
+        "rv32ui-p-ori",
+        "rv32ui-p-sll",
+        "rv32ui-p-slli",
+        "rv32ui-p-sra",
+        "rv32ui-p-srai",
+        "rv32ui-p-srl",
+        "rv32ui-p-srli",
+        "rv32ui-p-slt",
+        "rv32ui-p-sltu",
+        "rv32ui-p-slti",
+        "rv32ui-p-sltiu",
+        "rv32ui-p-auipc",
+        "rv32um-p-mul",
+        "rv32um-p-mulh",
+        "rv32um-p-mulhu",
+        "rv32um-p-mulhsu",
+        "rv32um-p-div",
+        "rv32um-p-divu",
+        "rv32um-p-rem",
+        "rv32um-p-remu",
+    ];
+
+    for inst_name in inst_list {
+        let program = elf::elf_loader(&Path::new("../riscv-tests/isa").join(inst_name));
+        let report = run(program, SimulationConfig::default());
+        assert_eq!(
+            report.final_registers[3],
+            1,
+            "ISA fixture {inst_name} failed with TESTNUM {}",
+            report.final_registers[3].saturating_sub(1) / 2
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires prebuilt runtime ELF workloads under target/riscv32im-unknown-none-elf/debug"]
+fn runtime_workload_artifacts_halt() {
+    for prog_name in ["hello", "print_nums", "msort", "qsort", "matmul"] {
+        let program = elf::elf_loader(
+            &Path::new("../target/riscv32im-unknown-none-elf/debug").join(prog_name),
+        );
+        let report = run(program, SimulationConfig::default());
+        assert!(
+            report.pipeline.inst_retire > 0,
+            "runtime workload {prog_name} retired no instructions"
+        );
+    }
+}

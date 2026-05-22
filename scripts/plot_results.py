@@ -17,6 +17,8 @@ CONFIG_FIELDS = (
     "rp",
     "wp",
     "prefetcher",
+    "bp",
+    "memory",
     "l1i_size",
     "l1i_block",
     "l1i_ways",

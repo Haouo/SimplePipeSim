@@ -1,0 +1,60 @@
+use simulator::hardware::mem::simple_dram::DramTiming;
+use simulator::sim::elf::ProgramInfo;
+use simulator::sim::runner::{
+    run, BackingMemoryKind, BackingMemoryReport, BranchPredictorKind, SimulationConfig,
+};
+
+const MEM_SIZE: usize = 0x40000;
+const ECALL: u32 = 0x00000073;
+const NOP: u32 = 0x00000013;
+
+fn halt_program() -> ProgramInfo {
+    let mut prog_body = vec![0u8; MEM_SIZE];
+    for inst in prog_body.chunks_exact_mut(4) {
+        inst.copy_from_slice(&NOP.to_le_bytes());
+    }
+    prog_body[0..4].copy_from_slice(&ECALL.to_le_bytes());
+    ProgramInfo {
+        entry_pc: 0,
+        prog_body,
+    }
+}
+
+#[test]
+fn runner_halts_raw_program_and_reports_hierarchy_stats() {
+    let report = run(halt_program(), SimulationConfig::default());
+
+    assert!(report.pipeline.inst_retire >= 1);
+    assert!(report.pipeline.total_ticked_cycle > 0);
+    assert_eq!(report.l1i.name, "L1-I$");
+    assert_eq!(report.l1d.name, "L1-D$");
+    assert_eq!(report.l2.name, "L2$");
+    assert!(matches!(
+        report.backing_memory,
+        BackingMemoryReport::SimpleMem
+    ));
+}
+
+#[test]
+fn runner_composes_dram_and_predictor_adapters() {
+    let config = SimulationConfig {
+        backing_memory: BackingMemoryKind::SimpleDram {
+            timing: DramTiming::educational_default(),
+        },
+        branch_predictor: BranchPredictorKind::Dummy,
+        ..SimulationConfig::default()
+    };
+
+    let report = run(halt_program(), config);
+
+    match report.backing_memory {
+        BackingMemoryReport::SimpleDram {
+            row_buffer_hit_cnt,
+            row_buffer_miss_cnt,
+        } => {
+            assert_eq!(row_buffer_hit_cnt, 0);
+            assert!(row_buffer_miss_cnt > 0);
+        }
+        BackingMemoryReport::SimpleMem => panic!("expected DRAM report"),
+    }
+}

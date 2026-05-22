@@ -14,10 +14,7 @@ pub struct Args {
     pub prog: String,
 
     /// Directory containing pre-built RISC-V ELF binaries.
-    #[arg(
-        long,
-        default_value = "../target/riscv32im-unknown-none-elf/debug"
-    )]
+    #[arg(long, default_value = "../target/riscv32im-unknown-none-elf/debug")]
     pub elf_dir: PathBuf,
 
     // -------- L1 Instruction cache --------
@@ -62,9 +59,18 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = PrefetcherArg::Null)]
     pub prefetcher: PrefetcherArg,
 
+    /// Branch predictor selected for control-flow instructions.
+    #[arg(long, value_enum, default_value_t = BranchPredictorArg::Bimodal)]
+    pub bp: BranchPredictorArg,
+
+    /// Backing memory behind the unified L2 cache.
+    #[arg(long, value_enum, default_value_t = BackingMemoryArg::SimpleMem)]
+    pub memory: BackingMemoryArg,
+
     /// Write per-cache statistics to this JSON file.
     /// Schema: { "pipeline": StatisticInfo, "l1i": StatisticInfo,
-    /// "l1d": StatisticInfo, "l2": StatisticInfo, "config": { mirror of CLI args } }.
+    /// "l1d": StatisticInfo, "l2": StatisticInfo, "backing_memory": ...,
+    /// "final_registers": [...], "config": { mirror of CLI args } }.
     #[arg(long)]
     pub stats_out: Option<PathBuf>,
 }
@@ -76,6 +82,17 @@ pub enum ReplacementPolicyArg {
     Random,
     /// Tree-based pseudo-LRU. Requires power-of-two associativity.
     Plru,
+}
+
+impl From<ReplacementPolicyArg> for crate::sim::runner::ReplacementPolicyKind {
+    fn from(a: ReplacementPolicyArg) -> Self {
+        use crate::sim::runner::ReplacementPolicyKind;
+        match a {
+            ReplacementPolicyArg::Fifo => ReplacementPolicyKind::Fifo,
+            ReplacementPolicyArg::Random => ReplacementPolicyKind::Random,
+            ReplacementPolicyArg::Plru => ReplacementPolicyKind::Plru,
+        }
+    }
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -98,9 +115,7 @@ pub enum WritePolicyArg {
     WtNwa,
 }
 
-impl From<WritePolicyArg>
-    for crate::hardware::mem::general_cache::write_policy::WritePolicy
-{
+impl From<WritePolicyArg> for crate::hardware::mem::general_cache::write_policy::WritePolicy {
     fn from(a: WritePolicyArg) -> Self {
         use crate::hardware::mem::general_cache::write_policy::WritePolicy;
         match a {
@@ -124,14 +139,53 @@ pub enum PrefetcherArg {
     NextLine,
 }
 
-impl From<PrefetcherArg>
-    for crate::hardware::mem::general_cache::prefetcher::PrefetcherKind
-{
+impl From<PrefetcherArg> for crate::hardware::mem::general_cache::prefetcher::PrefetcherKind {
     fn from(a: PrefetcherArg) -> Self {
         use crate::hardware::mem::general_cache::prefetcher::PrefetcherKind;
         match a {
             PrefetcherArg::Null => PrefetcherKind::Null,
             PrefetcherArg::NextLine => PrefetcherKind::NextLine,
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BranchPredictorArg {
+    /// Always predicts not-taken.
+    Dummy,
+    /// Branch target table plus the historical bimodal direction counter.
+    Bimodal,
+}
+
+impl From<BranchPredictorArg> for crate::sim::runner::BranchPredictorKind {
+    fn from(a: BranchPredictorArg) -> Self {
+        use crate::sim::runner::BranchPredictorKind;
+        match a {
+            BranchPredictorArg::Dummy => BranchPredictorKind::Dummy,
+            BranchPredictorArg::Bimodal => BranchPredictorKind::Bimodal,
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackingMemoryArg {
+    /// Flat-latency main memory.
+    SimpleMem,
+    /// Single-bank row-buffer-aware DRAM with educational timing defaults.
+    Dram,
+}
+
+impl From<BackingMemoryArg> for crate::sim::runner::BackingMemoryKind {
+    fn from(a: BackingMemoryArg) -> Self {
+        use crate::hardware::mem::simple_dram::DramTiming;
+        use crate::sim::runner::BackingMemoryKind;
+        match a {
+            BackingMemoryArg::SimpleMem => BackingMemoryKind::SimpleMem,
+            BackingMemoryArg::Dram => BackingMemoryKind::SimpleDram {
+                timing: DramTiming::educational_default(),
+            },
         }
     }
 }
