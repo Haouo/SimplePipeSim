@@ -76,7 +76,6 @@ pub(super) fn decode(op: &mut PreDecodeMicroOp, regs: &[u32; 32]) -> Result<(), 
             op.alu_op1_sel = AluOpOneSelect::RegRs1;
             op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
             op.alu_op_type = AluOpTypes::Add;
-            op.is_mem = true;
         }
         Instruction::Sb(inst) | Instruction::Sh(inst) | Instruction::Sw(inst) => {
             op.rs1 = Some((inst.rs1(), regs[inst.rs1() as usize]));
@@ -85,8 +84,6 @@ pub(super) fn decode(op: &mut PreDecodeMicroOp, regs: &[u32; 32]) -> Result<(), 
             op.alu_op1_sel = AluOpOneSelect::RegRs1;
             op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
             op.alu_op_type = AluOpTypes::Add;
-            op.is_mem = true;
-            op.is_store = true;
         }
         Instruction::Beq(inst)
         | Instruction::Bne(inst)
@@ -100,7 +97,6 @@ pub(super) fn decode(op: &mut PreDecodeMicroOp, regs: &[u32; 32]) -> Result<(), 
             op.alu_op1_sel = AluOpOneSelect::CurrentPc;
             op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
             op.alu_op_type = AluOpTypes::Add;
-            op.is_branch = true;
         }
         Instruction::Jal(inst) => {
             op.immediate_signext = inst.sign_ext();
@@ -109,7 +105,6 @@ pub(super) fn decode(op: &mut PreDecodeMicroOp, regs: &[u32; 32]) -> Result<(), 
             op.alu_op1_sel = AluOpOneSelect::CurrentPc;
             op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
             op.alu_op_type = AluOpTypes::Add;
-            op.is_branch = true;
         }
         Instruction::Jalr(inst) => {
             op.rs1 = Some((inst.rs1(), regs[inst.rs1() as usize]));
@@ -119,7 +114,6 @@ pub(super) fn decode(op: &mut PreDecodeMicroOp, regs: &[u32; 32]) -> Result<(), 
             op.alu_op1_sel = AluOpOneSelect::RegRs1;
             op.alu_op2_sel = AluOpTwoSelect::ImmSignExt;
             op.alu_op_type = AluOpTypes::Add;
-            op.is_branch = true;
         }
         Instruction::Lui(inst) => {
             op.rd_index = Some(inst.rd());
@@ -138,7 +132,7 @@ pub(super) fn decode(op: &mut PreDecodeMicroOp, regs: &[u32; 32]) -> Result<(), 
             op.alu_result_as_rd_dst_value = true;
         }
         Instruction::Fence(_) => return Err(DecodeError::UnsupportedFence { pc: op.pc }),
-        Instruction::Ecall(_) => op.is_env_call = true,
+        Instruction::Ecall(_) => {}
         Instruction::Illegal(raw_inst) => {
             return Err(DecodeError::IllegalInstruction {
                 raw_inst,

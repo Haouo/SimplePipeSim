@@ -8,6 +8,7 @@ use super::super::mem::general_cache::replacement_policy::ReplacementPolicy;
 use super::super::mem::general_cache::GeneralCache;
 use super::super::statistic::Statistic;
 use super::super::uop::*;
+use super::memory_access::{MemoryTransaction, MemoryTransactionStatus};
 use super::statistic;
 use super::{decode, execute};
 use crate::hardware::mem::general_cache::GeneralCacheConfig;
@@ -50,11 +51,9 @@ where
     mem_op: Option<PreDecodeMicroOp>,
     wb_op: Option<PreDecodeMicroOp>,
 
-    // FSM control logics about memory related stages (ID and MEM)
+    // FSM control logics about instruction fetch and data memory access.
     if_fsm: PipelineMemoryFSM,
-    mem_fsm: PipelineMemoryFSM,
-    mem_access_length_buffer: Option<usize>,
-    mem_load_buffer: Option<u32>,
+    mem_transaction: MemoryTransaction,
 
     // information for branch misprediction
     branch_recover: bool,
@@ -124,9 +123,7 @@ where
             mem_op: None,
             wb_op: None,
             if_fsm: PipelineMemoryFSM::default(),
-            mem_fsm: PipelineMemoryFSM::default(),
-            mem_access_length_buffer: None,
-            mem_load_buffer: None,
+            mem_transaction: MemoryTransaction::default(),
             branch_recover: false,
             branch_correct_direction: false,
             branch_destination: 0,
@@ -239,27 +236,19 @@ where
                 }
 
                 // make new uOp to ID
-                Some(PreDecodeMicroOp {
-                    raw_inst: new_raw_inst,
-                    inst: new_inst,
-                    pc: old_pc,
-                    is_branch: true,
-                    bp_result: Some(next_cycle_bp_result),
-                    ..Default::default()
-                })
+                Some(PreDecodeMicroOp::fetched_branch(
+                    new_raw_inst,
+                    new_inst,
+                    old_pc,
+                    next_cycle_bp_result,
+                ))
             } else {
                 let old_pc = self.if_pc;
                 // update PC
                 self.if_pc += 4;
 
                 // make new uOp to ID
-                Some(PreDecodeMicroOp {
-                    raw_inst: new_raw_inst,
-                    inst: new_inst,
-                    pc: old_pc,
-                    is_branch: false,
-                    ..Default::default()
-                })
+                Some(PreDecodeMicroOp::fetched(new_raw_inst, new_inst, old_pc))
             };
 
             // reset if_fsm
@@ -334,40 +323,26 @@ where
 
             // whether current ALU Result is write-back data to destination register rd
             if current_op.alu_result_as_rd_dst_value {
-                current_op.rd_write_value = Some(current_op.alu_result);
+                current_op.set_writeback_value(current_op.alu_result);
             }
 
             // Resolve control-flow instructions (conditional/unconditional branches)
             //
             // It must judge whether the last branch prediction result is correct and
             // notify the pipeline to perform branch recovery in need.
-            if current_op.is_branch {
-                let branch_op1 = current_op.rs1.unwrap_or((0, 0)).1;
-                let branch_op2 = current_op.rs2.unwrap_or((0, 0)).1;
-                let is_taken = execute::branch_taken(current_op.inst, branch_op1, branch_op2)
+            if let Some(branch) = current_op.branch_resolution_inputs() {
+                let is_taken = execute::branch_taken(branch.inst, branch.rs1, branch.rs2)
                     .expect("Non-control-flow instructions should not reach branch resolution");
 
                 // check whether the last branch prediction is incorrect
                 // There are two possible incorrec results
                 // 1. Predicted direction is wrong
                 // 2. Predicted direction is matched (both taken) while the predicted target PC is wrong
-                let need_recover = if current_op.bp_result.unwrap().direction != is_taken {
-                    true // scenario 1
-                } else {
-                    if is_taken && current_op.bp_result.unwrap().addr != current_op.alu_result {
-                        true // scenario 2
-                    } else {
-                        false
-                    }
-                };
+                let need_recover = branch.needs_recovery(is_taken);
                 if need_recover {
                     self.branch_recover = true;
                     self.branch_correct_direction = is_taken;
-                    self.branch_destination = if is_taken {
-                        current_op.alu_result
-                    } else {
-                        current_op.pc + 4
-                    };
+                    self.branch_destination = branch.recovery_destination(is_taken);
                     self.branch_flushes = 3;
                 }
                 self.hpm.solve_branch(need_recover);
@@ -385,93 +360,20 @@ where
             return;
         }
 
-        // handle the interaction with dcache
-        match self.mem_fsm {
-            PipelineMemoryFSM::Idle => {
-                // issue new request to dcache
-                if let Some(ref current_op) = self.mem_op {
-                    if current_op.is_mem {
-                        // first check access length
-                        let access_length = match current_op.inst {
-                            Instruction::Lw(_) | Instruction::Sw(_) => 4,
-                            Instruction::Lh(_) | Instruction::Lhu(_) | Instruction::Sh(_) => 2,
-                            Instruction::Lb(_) | Instruction::Lbu(_) | Instruction::Sb(_) => 1,
-                            _ => unreachable!(),
-                        };
-                        self.mem_access_length_buffer = Some(access_length);
-
-                        let new_req = if current_op.is_store {
-                            MemoryReqType::store(
-                                current_op.alu_result,
-                                current_op.rs2.unwrap().1.to_le_bytes()[0..access_length].to_vec(),
-                            )
-                        } else {
-                            MemoryReqType::load(current_op.alu_result, access_length)
-                        };
-                        if self.dcache.try_register_req(&new_req).is_err() {
-                            self.mem_fsm = PipelineMemoryFSM::SendingReq(new_req);
-                            return;
-                        }
-
-                        // register new request to dcache successfully
-                        // check whether it is hit
-                        if new_req.is_done() == false {
-                            self.mem_fsm = PipelineMemoryFSM::WaitingComplete(new_req);
-                            return;
-                        }
-                        // cache hit at the current cycle
-                        if current_op.is_store == false {
-                            // for load inst.
-                            self.mem_access_length_buffer.take().unwrap();
-                            let tmp_vec = new_req.load_data();
-                            let mut load_data = 0u32;
-                            for (idx, a_byte) in tmp_vec.iter().enumerate() {
-                                load_data += (*a_byte as u32) << (8 * idx);
-                            }
-                            self.mem_load_buffer = Some(load_data);
-                        }
-                    }
-                }
+        let load_value = if let Some(access) = self.mem_op.as_ref().unwrap().memory_access() {
+            match self.mem_transaction.progress(&mut self.dcache, access) {
+                MemoryTransactionStatus::Pending => return,
+                MemoryTransactionStatus::Complete { load_value } => load_value,
             }
-            PipelineMemoryFSM::SendingReq(ref new_req) => {
-                if self.dcache.try_register_req(new_req).is_err() {
-                    return;
-                }
+        } else {
+            None
+        };
 
-                // register new request to dcache successfully
-                // check whether it is hit
-                if new_req.is_done() == false {
-                    self.mem_fsm = PipelineMemoryFSM::WaitingComplete(new_req.clone());
-                    return;
-                }
-                // cache hit at the current cycle
-                if self.mem_op.as_ref().unwrap().is_store == false {
-                    // for load inst.
-                    self.mem_access_length_buffer.take().unwrap();
-                    let tmp_vec = new_req.load_data();
-                    let mut load_data = 0u32;
-                    for (idx, a_byte) in tmp_vec.iter().enumerate() {
-                        load_data += (*a_byte as u32) << (8 * idx);
-                    }
-                    self.mem_load_buffer = Some(load_data);
-                }
-            }
-            PipelineMemoryFSM::WaitingComplete(ref inflight_req) => {
-                if inflight_req.is_done() == false {
-                    return;
-                }
-                // cache hit at the current cycle
-                if self.mem_op.as_ref().unwrap().is_store == false {
-                    // for load inst.
-                    self.mem_access_length_buffer.take().unwrap();
-                    let tmp_vec = inflight_req.load_data();
-                    let mut load_data = 0u32;
-                    for (idx, a_byte) in tmp_vec.iter().enumerate() {
-                        load_data += (*a_byte as u32) << (8 * idx);
-                    }
-                    self.mem_load_buffer = Some(load_data);
-                }
-            }
+        if let Some(load_value) = load_value {
+            self.mem_op
+                .as_mut()
+                .expect("MEM-stage op should exist while materializing a load")
+                .set_writeback_value(load_value);
         }
 
         // stall if downstream is stalled
@@ -479,20 +381,7 @@ where
             return;
         }
 
-        // move load data from buffer to rd_write_value
-        // need to handle signed or zero extension at here
-        if let Some(load_data) = self.mem_load_buffer.take() {
-            self.mem_op.as_mut().unwrap().rd_write_value = match self.mem_op.as_ref().unwrap().inst
-            {
-                Instruction::Lhu(_) | Instruction::Lbu(_) | Instruction::Lw(_) => Some(load_data),
-                Instruction::Lh(_) => Some((((load_data << 16) as i32) >> 16) as u32),
-                Instruction::Lb(_) => Some((((load_data << 24) as i32) >> 24) as u32),
-                _ => unreachable!(),
-            }
-        }
-
-        // reset mem_fsm
-        self.mem_fsm = PipelineMemoryFSM::Idle;
+        self.mem_transaction.reset();
 
         // transfer mem_op to wb_op
         self.wb_op = self.mem_op.take();
@@ -518,13 +407,12 @@ where
 
         // handle current instruction in WB stage
         let current_op = self.wb_op.take().unwrap(); // take() consumes wb_op
-        if let Some(rd_index) = current_op.rd_index {
+        if let Some((rd_index, rd_write_value)) = current_op.writeback() {
             if rd_index != 0 {
-                self.id_regs[current_op.rd_index.unwrap() as usize] =
-                    current_op.rd_write_value.unwrap();
+                self.id_regs[rd_index as usize] = rd_write_value;
             }
         }
-        if current_op.placeholder == false {
+        if current_op.is_placeholder() == false {
             self.hpm.inst_ret(); // update HPM
         }
     }
@@ -542,16 +430,16 @@ where
         // Check scenario 1: WB -> EXE Forwarding Path (lower priority)
         if let (Some(exe_op), Some(wb_op)) = (&mut self.exe_op, &self.wb_op) {
             // check exe_op.rs1 <---> wb_op.rd
-            if let (Some(exe_rs1), Some(wb_rd_idx), Some(wb_rd_write_value)) =
-                (&mut exe_op.rs1, wb_op.rd_index, wb_op.rd_write_value)
+            if let (Some(exe_rs1), Some((wb_rd_idx, wb_rd_write_value))) =
+                (&mut exe_op.rs1, wb_op.writeback())
             {
                 if (exe_rs1.0 != 0) && (exe_rs1.0 == wb_rd_idx) {
                     exe_rs1.1 = wb_rd_write_value;
                 }
             }
             // check exe_op.rs2 <---> wb_op.rd
-            if let (Some(exe_rs2), Some(wb_rd_idx), Some(wb_rd_write_value)) =
-                (&mut exe_op.rs2, wb_op.rd_index, wb_op.rd_write_value)
+            if let (Some(exe_rs2), Some((wb_rd_idx, wb_rd_write_value))) =
+                (&mut exe_op.rs2, wb_op.writeback())
             {
                 if (exe_rs2.0 != 0) && (exe_rs2.0 == wb_rd_idx) {
                     exe_rs2.1 = wb_rd_write_value;
@@ -564,16 +452,16 @@ where
         // because the latter instruction (in MEM stage) has newest data
         if let (Some(exe_op), Some(mem_op)) = (&mut self.exe_op, &self.mem_op) {
             // check exe_op.rs1 <---> mem_op.rd
-            if let (Some(exe_rs1), Some(mem_rd_idx), Some(mem_rd_write_value)) =
-                (&mut exe_op.rs1, mem_op.rd_index, mem_op.rd_write_value)
+            if let (Some(exe_rs1), Some((mem_rd_idx, mem_rd_write_value))) =
+                (&mut exe_op.rs1, mem_op.writeback())
             {
                 if (exe_rs1.0 != 0) && (exe_rs1.0 == mem_rd_idx) {
                     exe_rs1.1 = mem_rd_write_value;
                 }
             }
             // check exe_op.rs2 <---> mem_op.rd
-            if let (Some(exe_rs2), Some(mem_rd_idx), Some(mem_rd_write_value)) =
-                (&mut exe_op.rs2, mem_op.rd_index, mem_op.rd_write_value)
+            if let (Some(exe_rs2), Some((mem_rd_idx, mem_rd_write_value))) =
+                (&mut exe_op.rs2, mem_op.writeback())
             {
                 if (exe_rs2.0 != 0) && (exe_rs2.0 == mem_rd_idx) {
                     exe_rs2.1 = mem_rd_write_value;
@@ -586,7 +474,10 @@ where
         // Checks whether the original instruction at EXE stage has moved to MEM stage
         if let (Some(id_op), None, Some(as_exe_op)) = (&self.id_op, &self.exe_op, &self.mem_op) {
             // check the original EXE instruction is LOAD
-            if as_exe_op.is_mem && !as_exe_op.is_store && as_exe_op.rd_index.is_some_and(|x| x != 0)
+            if as_exe_op.is_load()
+                && as_exe_op
+                    .destination_register()
+                    .is_some_and(|destination| destination != 0)
             {
                 let id_opcode: OpcodeMap = ((id_op.raw_inst & 0x7f) as u8)
                     .try_into()
@@ -602,10 +493,10 @@ where
                     _ => {
                         let id_rs1 = ((id_op.raw_inst >> 15) & 0x1f) as u8;
                         let id_rs2 = ((id_op.raw_inst >> 20) & 0x1f) as u8;
-                        if id_rs1 != 0 && id_rs1 == as_exe_op.rd_index.unwrap() {
+                        if id_rs1 != 0 && Some(id_rs1) == as_exe_op.destination_register() {
                             return true;
                         }
-                        if id_rs2 != 0 && id_rs2 == as_exe_op.rd_index.unwrap() {
+                        if id_rs2 != 0 && Some(id_rs2) == as_exe_op.destination_register() {
                             return true;
                         }
                     }
@@ -655,9 +546,7 @@ where
             if self.branch_flushes >= 4 {
                 self.hpm.inst_flush(self.mem_op.is_some());
                 self.mem_op = None;
-                self.mem_fsm = PipelineMemoryFSM::default();
-                self.mem_load_buffer = None;
-                self.mem_access_length_buffer = None;
+                self.mem_transaction.reset();
             }
             if self.branch_flushes >= 5 {
                 self.hpm.inst_flush(self.wb_op.is_some());
@@ -689,8 +578,7 @@ where
         // Inserting NOP makes the self.exe_op to be Some(...) instead of None
         if id_load_use_stall {
             assert!(self.exe_op.is_none());
-            self.exe_op = Some(PreDecodeMicroOp::generate_nop());
-            self.exe_op.as_mut().unwrap().placeholder = true;
+            self.exe_op = Some(PreDecodeMicroOp::placeholder_nop());
         }
 
         // tick L1-I$, L1-D$, and L2$

@@ -1,6 +1,7 @@
 // sub-modules
 pub mod cache_set; // model for single cache set (might contains multiple ways)
 pub mod config; // validated geometry and cache configuration
+mod lower_memory; // next-level memory request transaction
 pub mod prefetcher; // model for cache prefetcher (Null, NextLine, ...)
 pub mod replacement_policy; // model for cache replacement policy (e.g., Random, FIFO, LRU)
 pub mod statistic; // utils of statistics for cache
@@ -11,6 +12,7 @@ use crate::hardware::clock::Clocked;
 use crate::hardware::mem::abstract_mem::*;
 use cache_set::GeneralCacheSetUnit;
 pub use config::{GeneralCacheConfig, GeneralCacheConfigError};
+use lower_memory::LowerMemoryTransaction;
 use prefetcher::Prefetcher;
 use replacement_policy::ReplacementPolicy;
 use statistic::StatisticInfo;
@@ -64,8 +66,8 @@ use std::rc::Rc;
 ///                                      the original request
 /// ```
 ///
-/// `WriteBack` and `Allocate` each carry a small secondary FSM
-/// (`StatesForOutMemReq`) plus the index of the way being evicted.
+/// `WriteBack` and `Allocate` each carry a lower-memory transaction
+/// plus the index of the way being evicted.
 enum MainStates {
     /// No request in flight, no pending request to start.
     Idle,
@@ -74,10 +76,10 @@ enum MainStates {
     Lookup(MemoryReqType),
     /// Sending or waiting for a write-back of a dirty victim to the next
     /// level of memory. `usize` is the evicted way index.
-    WriteBack(StatesForOutMemReq, usize),
+    WriteBack(LowerMemoryTransaction, usize),
     /// Sending or waiting for a refill from the next level of memory.
     /// `usize` is the way index the refill will be inserted into.
-    Allocate(StatesForOutMemReq, usize),
+    Allocate(LowerMemoryTransaction, usize),
     /// Stall for an additional fixed penalty after a miss completes,
     /// modelling tag-array re-access / pipeline bubble cost.
     AdditionalMissPenalty(usize),
@@ -85,19 +87,12 @@ enum MainStates {
     /// has already been updated; this state drives the same store to the
     /// next-level memory. When the next-level store completes we mark
     /// the original request complete and return to Idle.
-    WriteThroughCommit(StatesForOutMemReq, MemoryReqType),
+    WriteThroughCommit(LowerMemoryTransaction, MemoryReqType),
     /// Used by no-write-allocate policies on a store miss: the cache
     /// stays untouched and the store goes straight to the next level.
     /// On completion we mark the original request complete and return
     /// to Idle.
-    WriteAround(StatesForOutMemReq, MemoryReqType),
-}
-
-/// States of secondary FSM to handling memory requests to next-level memory.
-/// This is used when writing-back or allocating.
-enum StatesForOutMemReq {
-    SendReq(MemoryReqType),
-    WaitForComplete(MemoryReqType),
+    WriteAround(LowerMemoryTransaction, MemoryReqType),
 }
 
 pub struct GeneralCache<RP: ReplacementPolicy, M: AbstractMemoryInterface> {
@@ -329,7 +324,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                                     let propagate =
                                         MemoryReqType::store(req.get_addr(), store_req.data());
                                     next_state = Some(MainStates::WriteThroughCommit(
-                                        StatesForOutMemReq::SendReq(propagate),
+                                        LowerMemoryTransaction::new(propagate),
                                         req.clone(),
                                     ));
                                 } else {
@@ -362,7 +357,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                             // next level and skip allocation.
                             let propagate = MemoryReqType::store(req.get_addr(), req.store_data());
                             self.fsm = MainStates::WriteAround(
-                                StatesForOutMemReq::SendReq(propagate),
+                                LowerMemoryTransaction::new(propagate),
                                 req.clone(),
                             );
                         } else {
@@ -386,7 +381,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
 
                                 // transfer self.fsm to WriteBack
                                 self.fsm = MainStates::WriteBack(
-                                    StatesForOutMemReq::SendReq(write_back_store_req),
+                                    LowerMemoryTransaction::new(write_back_store_req),
                                     evict_way,
                                 );
                             } else {
@@ -403,7 +398,7 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
 
                                 // transfer self.fsm to Allocate
                                 self.fsm = MainStates::Allocate(
-                                    StatesForOutMemReq::SendReq(allocate_read_req),
+                                    LowerMemoryTransaction::new(allocate_read_req),
                                     evict_way,
                                 );
                             }
@@ -435,58 +430,31 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
                 }
             }
 
-            // * write-back state -> handling write request to next-level memory via secondary FSM
-            MainStates::WriteBack(ref mut second_state, ref evict_way) => {
-                match second_state {
-                    // try to send write request to next-level memory until it is accepted
-                    StatesForOutMemReq::SendReq(ref req) => {
-                        if self.mem_ref.borrow_mut().try_register_req(req).is_ok() {
-                            *second_state = StatesForOutMemReq::WaitForComplete(req.clone());
-                        }
-                    }
-
-                    // wait for the write request to next-level memory to be completed
-                    StatesForOutMemReq::WaitForComplete(ref req) => {
-                        if req.is_done() {
-                            // prepare for allocate
-                            let allocate_addr = self.backup_req.as_ref().unwrap().get_addr()
-                                & !((1 << self.offset_bit_width) - 1);
-                            let allocate_len = 2usize.pow(self.offset_bit_width as u32);
-                            let allocate_req = MemoryReqType::load(allocate_addr, allocate_len);
-                            // transfer to allocate state, and reset self.second_state
-                            self.fsm = MainStates::Allocate(
-                                StatesForOutMemReq::SendReq(allocate_req),
-                                *evict_way,
-                            );
-                        }
-                    }
+            // * write-back state -> handling write request to next-level memory
+            MainStates::WriteBack(ref mut transaction, ref evict_way) => {
+                if transaction.progress(&self.mem_ref) {
+                    // prepare for allocate
+                    let allocate_addr = self.backup_req.as_ref().unwrap().get_addr()
+                        & !((1 << self.offset_bit_width) - 1);
+                    let allocate_len = 2usize.pow(self.offset_bit_width as u32);
+                    let allocate_req = MemoryReqType::load(allocate_addr, allocate_len);
+                    self.fsm =
+                        MainStates::Allocate(LowerMemoryTransaction::new(allocate_req), *evict_way);
                 }
             }
 
-            // * allocate state: handling read request to next-level memory via secondary FSM
-            MainStates::Allocate(ref mut second_state, ref evict_way) => {
-                // println!("Cache Allocate...");
-                match second_state {
-                    StatesForOutMemReq::SendReq(ref req) => {
-                        // try to send read request to next-level memory
-                        if self.mem_ref.borrow_mut().try_register_req(req).is_ok() {
-                            *second_state = StatesForOutMemReq::WaitForComplete(req.clone());
-                        }
-                    }
-                    StatesForOutMemReq::WaitForComplete(ref req) => {
-                        if req.is_done() {
-                            // get load data
-                            let load_data = req.load_data();
+            // * allocate state: handling read request to next-level memory
+            MainStates::Allocate(ref mut transaction, ref evict_way) => {
+                if transaction.progress(&self.mem_ref) {
+                    let load_data = transaction.load_data();
 
-                            // "insert" (not write) load data into cache set
-                            let (new_tag, index, _) =
-                                self.addr_transfer(self.backup_req.as_ref().unwrap().get_addr());
-                            self.set[index].insert_block(*evict_way, new_tag, load_data.as_ref());
+                    // "insert" (not write) load data into cache set
+                    let (new_tag, index, _) =
+                        self.addr_transfer(self.backup_req.as_ref().unwrap().get_addr());
+                    self.set[index].insert_block(*evict_way, new_tag, load_data.as_ref());
 
-                            // transfer self.fsm to AdditionalMissPenalty state
-                            self.fsm = MainStates::AdditionalMissPenalty(self.miss_penalty);
-                        }
-                    }
+                    // transfer self.fsm to AdditionalMissPenalty state
+                    self.fsm = MainStates::AdditionalMissPenalty(self.miss_penalty);
                 }
             }
 
@@ -502,44 +470,18 @@ impl<RP: ReplacementPolicy, M: AbstractMemoryInterface> Clocked for GeneralCache
 
             // * write-through commit: drive the propagated store to the
             //   next level of memory. When it completes, ack the caller.
-            MainStates::WriteThroughCommit(ref mut second_state, ref caller_req) => {
-                let mut completed = false;
-                match second_state {
-                    StatesForOutMemReq::SendReq(ref req) => {
-                        if self.mem_ref.borrow_mut().try_register_req(req).is_ok() {
-                            *second_state = StatesForOutMemReq::WaitForComplete(req.clone());
-                        }
-                    }
-                    StatesForOutMemReq::WaitForComplete(ref req) => {
-                        if req.is_done() {
-                            caller_req.complete_store();
-                            completed = true;
-                        }
-                    }
-                }
-                if completed {
+            MainStates::WriteThroughCommit(ref mut transaction, ref caller_req) => {
+                if transaction.progress(&self.mem_ref) {
+                    caller_req.complete_store();
                     self.fsm = MainStates::Idle;
                 }
             }
 
             // * write-around: send the bypassing store to the next level
             //   and, when it completes, ack the caller.
-            MainStates::WriteAround(ref mut second_state, ref caller_req) => {
-                let mut completed = false;
-                match second_state {
-                    StatesForOutMemReq::SendReq(ref req) => {
-                        if self.mem_ref.borrow_mut().try_register_req(req).is_ok() {
-                            *second_state = StatesForOutMemReq::WaitForComplete(req.clone());
-                        }
-                    }
-                    StatesForOutMemReq::WaitForComplete(ref req) => {
-                        if req.is_done() {
-                            caller_req.complete_store();
-                            completed = true;
-                        }
-                    }
-                }
-                if completed {
+            MainStates::WriteAround(ref mut transaction, ref caller_req) => {
+                if transaction.progress(&self.mem_ref) {
+                    caller_req.complete_store();
                     self.fsm = MainStates::Idle;
                 }
             }
