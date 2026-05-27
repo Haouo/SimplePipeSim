@@ -36,38 +36,89 @@ use std::rc::Rc;
 /// State diagram
 /// -------------
 /// ```text
-///                        ┌───────────────────────────────┐
-///                        ▼                               │
-///   ┌──────┐ pending_req ┌────────┐ hit                 │
-///   │ Idle │────────────▶│ Lookup │─────────────────────┘
-///   └──────┘             └────────┘
-///       ▲                    │ miss
-///       │                    ▼
-///       │           ┌──────────────────┐  dirty victim
-///       │           │ select victim    │─────────────┐
-///       │           └──────────────────┘             │
-///       │                    │ clean victim          ▼
-///       │                    │              ┌────────────────┐
-///       │                    │              │ WriteBack      │
-///       │                    │              │ (SendReq /     │
-///       │                    │              │  WaitForCompl) │
-///       │                    │              └────────┬───────┘
-///       │                    ▼                       ▼
-///       │           ┌──────────────────────────────────┐
-///       │           │ Allocate                         │
-///       │           │ (SendReq / WaitForComplete)      │
-///       │           └────────────────┬─────────────────┘
-///       │                            ▼
-///       │           ┌──────────────────────────────────┐
-///       │           │ AdditionalMissPenalty(countdown) │
-///       │           └────────────────┬─────────────────┘
-///       │                            │ countdown reaches 0,
-///       └────────────────────────────┘ re-enter Lookup to finish
-///                                      the original request
+///                        ┌──────────────────────────────────────────────┐
+///                        │  (hit / WT commit done / WA done / prefetch   │
+///                        │   hit) — return to Idle                       │
+///                        ▼                                              │
+///   ┌──────┐ pending_req=Some                                           │
+///   │ Idle │──────────────────────┐                                     │
+///   │      │ prefetch_queue !=∅   │                                     │
+///   │      │ && !in_flight        │                                     │
+///   │      │ && pending_req=None  │                                     │
+///   └──────┘──────────────────────┤                                     │
+///       ▲                         ▼                                     │
+///       │                  ┌──────────────┐                             │
+///       │                  │   Lookup     │  tag compare                │
+///       │                  │ (demand req  │                             │
+///       │                  │  or synthetic│                             │
+///       │                  │  prefetch)   │                             │
+///       │                  └──┬────────┬──┘                             │
+///       │             HIT     │        │ MISS                           │
+///       │       ┌─────────────┘        └──────────────┐                 │
+///       │       ▼                                     ▼                 │
+///       │ ┌───────────────────────┐         ┌──────────────────────┐    │
+///       │ │ Load: fill buffer     │         │ Store + NWA?         │    │
+///       │ │ Store(WB): dirty+done │         │  ── yes ──┐          │    │
+///       │ │ Store(WT): clean,     │         │           ▼          │    │
+///       │ │            propagate  │         │   ┌─────────────┐    │    │
+///       │ └────────┬──────────────┘         │   │ WriteAround │    │    │
+///       │          │ Store(WT)              │   │ (tx, req)   │    │    │
+///       │          ▼                        │   └──────┬──────┘    │    │
+///       │ ┌───────────────────────┐         │          │ tx done   │    │
+///       │ │ WriteThroughCommit    │         │          │ + ack     │    │
+///       │ │ (tx, caller_req)      │         │          └──────────────────┐
+///       │ └────────┬──────────────┘         │  ── no ── select victim    │
+///       │          │ tx done + ack          │       │                    │
+///       │          └─────────────────────────────────│                    │
+///       │                                            │                    │
+///       │                              dirty victim  │  clean victim      │
+///       │                                     ┌──────┴──────┐             │
+///       │                                     ▼             ▼             │
+///       │                              ┌────────────┐       │             │
+///       │                              │ WriteBack  │       │             │
+///       │                              │ (tx, way)  │       │             │
+///       │                              └─────┬──────┘       │             │
+///       │                                    │ tx done      │             │
+///       │                                    ▼              ▼             │
+///       │                              ┌────────────────────────┐         │
+///       │                              │ Allocate (tx, way)     │         │
+///       │                              └──────────┬─────────────┘         │
+///       │                                         │ tx done,              │
+///       │                                         │ insert_block          │
+///       │                                         ▼                       │
+///       │                              ┌────────────────────────┐         │
+///       │                              │ AdditionalMissPenalty  │         │
+///       │                              │ (countdown)            │         │
+///       │                              └──────────┬─────────────┘         │
+///       │                                         │ counter == 0,         │
+///       │                                         │ re-Lookup(backup_req) │
+///       └─────────────────────────────────────────┘                       │
+///                                                                         │
+///       (all return paths feed back into Idle) ────────────────────────────┘
 /// ```
 ///
-/// `WriteBack` and `Allocate` each carry a lower-memory transaction
-/// plus the index of the way being evicted.
+/// State payloads
+/// --------------
+/// - `WriteBack(tx, way)` / `Allocate(tx, way)` carry a lower-memory
+///   transaction plus the way index being evicted/filled.
+/// - `WriteThroughCommit(tx, caller_req)` carries the propagated store
+///   transaction and the original requester to ack on completion.
+/// - `WriteAround(tx, caller_req)` is the no-write-allocate counterpart
+///   for store misses: the cache is left untouched and the store goes
+///   straight to the next level.
+/// - `AdditionalMissPenalty(n)` counts down `miss_penalty` cycles before
+///   re-entering `Lookup` with `backup_req` to finish the original
+///   demand/prefetch request.
+///
+/// Prefetcher interaction
+/// ----------------------
+/// The prefetch arm of `Idle` is listed first in `tick()`, but its guard
+/// requires `pending_req.is_none()` — so demand requests always win.
+/// While a synthetic prefetch is in flight (`prefetch_in_flight = true`)
+/// the `Lookup` arm suppresses demand-access HPM updates and skips
+/// re-prediction. The flag is cleared when the prefetch finally hits in
+/// `Lookup` (either immediately or after the Allocate + MissPenalty
+/// loop).
 enum MainStates {
     /// No request in flight, no pending request to start.
     Idle,
